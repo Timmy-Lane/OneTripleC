@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "./interfaces/IUniswapV3Router.sol";
+import "./interfaces/IV3SwapRouter.sol";
 
 contract OneTripleC is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
