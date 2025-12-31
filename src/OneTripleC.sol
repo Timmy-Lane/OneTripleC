@@ -21,7 +21,7 @@ contract OneTripleC is Ownable, ReentrancyGuard {
         uint256 amountIn;
         uint256 amountOutMin;
         uint256 deadline;
-        uint160 sqrtPriceLimitX96;
+        uint160 sqrtPriceLimitX96; // 0 = no limit
     }
 
     modifier onlyExecutor() {
@@ -40,7 +40,10 @@ contract OneTripleC is Ownable, ReentrancyGuard {
         uint256 amountOut,
         uint256 amountOutMin
     );
-    event BatchSwapExecuted(address indexed executor, uint256 len);
+    event BatchSwapExecuted(address indexed executor, uint256 count);
+
+    event Swept(address indexed token, address indexed to, uint256 amount);
+    event SweptETH(address indexed to, uint256 amount);
 
     error ZeroAddress();
     error NotExecutor(address);
@@ -72,7 +75,7 @@ contract OneTripleC is Ownable, ReentrancyGuard {
     function swap(
         SwapInstruction calldata s
     ) external onlyExecutor nonReentrant returns (uint256 amountOut) {
-        amountOut = _executeSwap(s);
+        return _executeSwap(s);
     }
 
     function batchSwap(
@@ -135,4 +138,26 @@ contract OneTripleC is Ownable, ReentrancyGuard {
             s.amountOutMin
         );
     }
+
+    function sweepToken(
+        address token,
+        address to,
+        uint256 amount
+    ) external onlyOwner nonReentrant {
+        if (token == address(0) || to == address(0)) revert ZeroAddress();
+        IERC20(token).safeTransfer(to, amount);
+        emit Swept(token, to, amount);
+    }
+
+    function sweepETH(
+        address to,
+        uint256 amount
+    ) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        (bool ok, ) = to.call{value: amount}("");
+        require(ok, "ETH_TRANSFER_FAIL");
+        emit SweptETH(to, amount);
+    }
+
+    receive() external payable {}
 }
