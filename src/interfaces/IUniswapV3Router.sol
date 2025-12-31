@@ -16,10 +16,22 @@ interface IV3SwapRouter {
         uint160 sqrtPriceLimitX96;
     }
 
+    struct ExactInputParams {
+        bytes path;
+        address recipient;
+        uint256 deadline;
+        uint256 amountIn;
+        uint256 amountOutMinimum;
+    }
+
     /// @notice Swaps a fixed amount of one token for as much as possible of another token
     /// @param params The parameters necessary for the swap, encoded as ExactInputSingleParams
     /// @return amountOut The amount of the received token
     function exactInputSingle(
         ExactInputSingleParams calldata params
-    ) external payable returns (uint256 amountOut);
+    ) external returns (uint256 amountOut);
+
+    function exactInput(
+        ExactInputParams calldata params
+    ) external returns (uint256 amountOut);
 }
