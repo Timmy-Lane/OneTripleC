@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.30;
+pragma solidity ^0.8.20;
 
-/// @title IV3SwapRouter
-/// @notice Minimal Uniswap v3 SwapRouter interface for exactInputSingle execution
-/// @dev Intentionally minimal for portfolio / execution-only usage
 interface IV3SwapRouter {
     struct ExactInputSingleParams {
         address tokenIn;
@@ -24,9 +21,6 @@ interface IV3SwapRouter {
         uint256 amountOutMinimum;
     }
 
-    /// @notice Swaps a fixed amount of one token for as much as possible of another token
-    /// @param params The parameters necessary for the swap, encoded as ExactInputSingleParams
-    /// @return amountOut The amount of the received token
     function exactInputSingle(
         ExactInputSingleParams calldata params
     ) external returns (uint256 amountOut);

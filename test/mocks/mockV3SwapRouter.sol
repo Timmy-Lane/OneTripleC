@@ -10,7 +10,7 @@ interface IMintable {
 
 contract MockV3SwapRouter is IV3SwapRouter {
     bool public shouldRevert;
-    uint256 public fixedAmountOut; // if 0 -> amountOut = amountIn (1:1)
+    uint256 public fixedAmountOut; // 0 => 1:1
 
     function setShouldRevert(bool v) external {
         shouldRevert = v;
@@ -36,7 +36,11 @@ contract MockV3SwapRouter is IV3SwapRouter {
         require(amountOut >= params.amountOutMinimum, "SLIPPAGE");
 
         IMintable(params.tokenOut).mint(params.recipient, amountOut);
+    }
 
-        return amountOut;
+    function exactInput(
+        ExactInputParams calldata
+    ) external pure override returns (uint256) {
+        revert("MOCK_EXACT_INPUT_NOT_SUPPORTED"); // stub
     }
 }
