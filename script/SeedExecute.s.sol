@@ -17,7 +17,7 @@ contract SeedExecute is Script {
 
         otc.addExecutor(executor);
 
-        IERC20(tokenIn).transfer(otcAdr, 1 ether);
+        IERC20(tokenIn).transfer(otcAdr, 0.1 ether);
 
         vm.stopBroadcast();
     }
