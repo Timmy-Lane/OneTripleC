@@ -25,8 +25,8 @@ contract OneTripleC is Ownable, ReentrancyGuard {
     }
 
     struct MultiHopSwap {
+        address tokenIn;
         bytes path; // tokenA + fee + tokenB + fee + tokenC
-        address recipient;
         uint256 deadline;
         uint256 amountIn;
         uint256 amountOutMin;
@@ -170,13 +170,8 @@ contract OneTripleC is Ownable, ReentrancyGuard {
             revert DeadlineExpired(block.timestamp, s.deadline);
         }
 
-        address tokenIn;
-        assembly {
-            tokenIn := shr(96, calldataload(s))
-        }
-
-        IERC20(tokenIn).forceApprove(swapRouter, 0);
-        IERC20(tokenIn).safeIncreaseAllowance(swapRouter, s.amountIn);
+        IERC20(s.tokenIn).forceApprove(swapRouter, 0);
+        IERC20(s.tokenIn).safeIncreaseAllowance(swapRouter, s.amountIn);
 
         amountOut = IV3SwapRouter(swapRouter).exactInput(
             IV3SwapRouter.ExactInputParams({
@@ -190,7 +185,7 @@ contract OneTripleC is Ownable, ReentrancyGuard {
 
         emit MultiHopSwapExecuted(
             msg.sender,
-            tokenIn,
+            s.tokenIn,
             s.amountIn,
             amountOut,
             s.amountOutMin
