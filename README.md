@@ -1,66 +1,35 @@
-## Foundry
+# OneTripleC — DeFi Router Executor
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Portfolio project demonstrating a production-style on-chain execution contract.
 
-Foundry consists of:
+## What this contract does
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+-  Executes swaps via Uniswap v3
+-  Receives all decisions off-chain
+-  Supports atomic batch execution
+-  Uses strict owner/executor access control
 
-## Documentation
+## What this contract does NOT do
 
-https://book.getfoundry.sh/
+-  No price discovery
+-  No oracles
+-  No UI
+-  No aggregation logic
 
-## Usage
+## Architecture
 
-### Build
+Off-chain bot prepares swap instructions →  
+Executor submits tx →  
+Contract validates + executes via Uniswap v3
 
-```shell
-$ forge build
-```
+## Tech stack
 
-### Test
+-  Solidity + OpenZeppelin
+-  Foundry (tests + scripts)
+-  TypeScript (off-chain execution)
 
-```shell
-$ forge test
-```
+## Why this project
 
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+This project is intentionally scoped as an execution-layer contract
+similar to production DeFi systems (e.g. 1inch execution routers),
+built for portfolio and hiring purposes.
