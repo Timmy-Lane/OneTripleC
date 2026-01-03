@@ -33,3 +33,5 @@ Contract validates + executes via Uniswap v3
 This project is intentionally scoped as an execution-layer contract
 similar to production DeFi systems (e.g. 1inch execution routers),
 built for portfolio and hiring purposes.
+
+Unlike Uniswap Universal Router, this contract is designed as a restricted execution vault for off-chain strategies, not as a permissionless user router. Decisions such as routing, slippage, and execution order are intentionally moved off-chain.
