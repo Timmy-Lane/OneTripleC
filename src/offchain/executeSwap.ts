@@ -52,10 +52,10 @@ async function main(tokenIn: string, tokenOut: string) {
    console.log('Swap executed in block: ', receipt.blockNumber)
 }
 
-const tokenIn = '0x'
-const tokenOut = '0x'
+const WETH = '0xdd13E55209Fd76AfE204dBda4007C227904f0a81'
+const USDC = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'
 
-main(tokenIn, tokenOut).catch((err) => {
+main(WETH, USDC).catch((err) => {
    console.error(err)
    process.exit(1)
 })
