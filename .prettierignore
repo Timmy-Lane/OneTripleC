@@ -1,0 +1,10 @@
+node_modules/
+dist/
+contracts/out/
+contracts/cache/
+contracts/lib/
+*.lock
+*.log
+package-lock.json
+yarn.lock
+bun.lockb

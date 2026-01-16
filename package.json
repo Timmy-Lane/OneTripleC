@@ -1,21 +1,52 @@
 {
-  "name": "OneTripleC",
+  "name": "onetriplec",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Telegram-first cross-chain intent execution platform for EVM networks",
+  "main": "src/api/server.ts",
+  "type": "module",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "packageManager": "pnpm@10.26.2",
-  "dependencies": {
-    "dotenv": "^17.2.3",
-    "viem": "^2.43.4"
+    "dev": "bun --watch src/api/server.ts",
+    "start": "bun src/api/server.ts",
+    "build": "bun build src/api/server.ts --outdir ./dist --target bun",
+    "test": "bun test",
+    "typecheck": "bun tsc --noEmit",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio",
+    "worker:start": "bun src/workers/index.ts",
+    "contracts:build": "forge build",
+    "contracts:test": "forge test"
   },
   "devDependencies": {
-    "@types/node": "^25.0.3",
+    "@eslint/js": "^9.39.2",
+    "@types/bun": "latest",
+    "@types/node": "^25.0.9",
+    "@types/pg": "^8.16.0",
+    "@typescript-eslint/eslint-plugin": "^8.53.0",
+    "@typescript-eslint/parser": "^8.53.0",
+    "eslint": "^9.39.2",
+    "prettier": "^3.8.0",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/helmet": "^13.0.2",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/swagger": "^9.6.1",
+    "@fastify/swagger-ui": "^5.2.4",
+    "bullmq": "^5.66.5",
+    "dotenv": "^17.2.3",
+    "drizzle-kit": "^0.31.8",
+    "drizzle-orm": "^0.45.1",
+    "fastify": "^5.7.1",
+    "ioredis": "^5.9.2",
+    "pg": "^8.17.1",
+    "viem": "^2.44.4",
+    "zod": "^4.3.5"
   }
 }
