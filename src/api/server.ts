@@ -12,7 +12,6 @@ const app = fastify({
   },
 });
 
-// Security and performance plugins
 await app.register(helmet);
 await app.register(cors, {
   origin: config.CORS_ORIGINS,
@@ -22,7 +21,7 @@ await app.register(rateLimit, {
   timeWindow: '1 minute',
 });
 
-// API documentation
+// API docs
 await app.register(swagger, {
   openapi: {
     info: {
