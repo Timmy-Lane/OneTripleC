@@ -7,7 +7,7 @@ const envSchema = z.object({
   // API Configuration
   PORT: z.coerce.number().default(3000),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
-  CORS_ORIGINS: z.string().transform(val => val.split(',')).default('http://localhost:3000'),
+  CORS_ORIGINS: z.string().default('http://localhost:3000').transform(val => val.split(',')),
 
   // Database
   DATABASE_URL: z.string(),

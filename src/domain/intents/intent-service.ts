@@ -9,7 +9,7 @@ import type { Intent } from '../../shared/types/index.js';
  * 4. Status tracking
  */
 export class IntentService {
-  async createIntent(params: {
+  async createIntent(_params: {
     userId: string;
     sourceChain: string;
     targetChain: string;
@@ -18,32 +18,22 @@ export class IntentService {
     sourceAmount: string;
     minTargetAmount?: string;
   }): Promise<Intent> {
-    // TODO: Implement intent creation logic
-    // 1. Validate parameters
-    // 2. Calculate optimal route
-    // 3. Estimate fees and output
-    // 4. Store in database
-    // 5. Queue for execution
-    
     throw new Error('Not implemented');
   }
 
-  async getIntentById(intentId: string): Promise<Intent | null> {
-    // TODO: Fetch intent from repository
+  async getIntentById(_intentId: string): Promise<Intent | null> {
     throw new Error('Not implemented');
   }
 
   async updateIntentStatus(
-    intentId: string, 
-    status: Intent['status'],
-    metadata?: Record<string, unknown>
+    _intentId: string, 
+    _status: Intent['status'],
+    _metadata?: Record<string, unknown>
   ): Promise<void> {
-    // TODO: Update intent status with audit trail
     throw new Error('Not implemented');
   }
 
-  async cancelIntent(intentId: string): Promise<void> {
-    // TODO: Cancel pending intent and refund if necessary
+  async cancelIntent(_intentId: string): Promise<void> {
     throw new Error('Not implemented');
   }
 }

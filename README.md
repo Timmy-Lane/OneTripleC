@@ -110,41 +110,150 @@ OneTripleC/
 ## ⚙️ Local Development
 
 ### Prerequisites
-- [Bun](https://bun.sh/) (latest)
-- [PostgreSQL](https://postgresql.org/) (local or Docker)
-- [Redis](https://redis.io/) (local or Docker)
-- [Foundry](https://getfoundry.sh/) (for contracts)
 
-### Setup
+**Required:**
+- [Bun](https://bun.sh/) v1.0.0 or later
+- [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/install/) (for local infrastructure)
+
+**Optional:**
+- [Foundry](https://getfoundry.sh/) (for smart contract development)
+
+### Quick Start
+
+**1. Clone and install dependencies:**
+
 ```bash
-# Clone and install
 git clone <repository>
 cd OneTripleC
 bun install
+```
 
-# Environment configuration
+**2. Start local infrastructure (PostgreSQL + Redis):**
+
+```bash
+# Start PostgreSQL and Redis in Docker
+docker compose up -d
+
+# Verify containers are running
+docker compose ps
+```
+
+**3. Configure environment:**
+
+```bash
+# Copy environment template
 cp .env.example .env
-# Edit .env with your local database and RPC URLs
 
-# Database setup
+# Edit .env and set:
+# - DATABASE_URL (default works with Docker Compose)
+# - REDIS_URL (default works with Docker Compose)
+# - RPC URLs for Ethereum, Base, Arbitrum (use public RPCs or your own)
+# - EXECUTOR_PRIVATE_KEY (create a dedicated test wallet)
+```
+
+**4. Initialize database:**
+
+```bash
+# Generate and run migrations
 bun run db:generate
 bun run db:migrate
 
-# Run in development
-bun run dev          # Start API server
-bun run worker:start # Start background workers (separate terminal)
-
-# Code quality
-bun run typecheck    # TypeScript validation
-bun run lint         # ESLint checks
-bun run format       # Prettier formatting
+# (Optional) Open Drizzle Studio to inspect database
+bun run db:studio
 ```
 
-### Contracts
+**5. Start the backend:**
+
 ```bash
-# Solidity development
-bun run contracts:build
-bun run contracts:test
+# Terminal 1: Start API server
+bun run dev
+
+# Terminal 2: Start background workers
+bun run worker:start
+```
+
+The API will be available at `http://localhost:3000`. Health check: `http://localhost:3000/health`
+
+### Infrastructure Details
+
+**Docker Compose services:**
+
+- **PostgreSQL**: Port `5432`, database `onetriplec`
+- **Redis**: Port `6379`, persistence enabled
+
+**Stopping infrastructure:**
+
+```bash
+# Stop containers (keeps data)
+docker compose stop
+
+# Stop and remove containers (keeps volumes)
+docker compose down
+
+# Stop and remove everything including data
+docker compose down -v
+```
+
+### Development Commands
+
+```bash
+# API & Workers
+bun run dev              # Start API server with hot reload
+bun run worker:start     # Start background workers
+bun run start            # Production mode (no hot reload)
+
+# Database
+bun run db:generate      # Generate Drizzle migrations
+bun run db:migrate       # Run migrations
+bun run db:studio        # Open Drizzle Studio
+
+# Code Quality
+bun run typecheck        # TypeScript type checking
+bun run lint             # ESLint
+bun run lint:fix         # ESLint with auto-fix
+bun run format           # Prettier formatting
+bun run format:check     # Check formatting
+bun test                 # Run tests
+
+# Smart Contracts (optional)
+bun run contracts:build  # Compile Solidity contracts
+bun run contracts:test   # Run Foundry tests
+```
+
+### Troubleshooting
+
+**Database connection failed:**
+
+```bash
+# Check PostgreSQL is running
+docker compose ps
+
+# Check PostgreSQL logs
+docker compose logs postgres
+
+# Restart PostgreSQL
+docker compose restart postgres
+```
+
+**Redis connection failed:**
+
+```bash
+# Check Redis is running
+docker compose ps
+
+# Check Redis logs
+docker compose logs redis
+
+# Test Redis connection
+docker compose exec redis redis-cli ping
+```
+
+**Port already in use:**
+
+```bash
+# Change PORT in .env (default 3000)
+# Or find and kill the process using the port:
+lsof -ti:3000 | xargs kill -9
 ```
 
 ## 📋 What This Project Demonstrates

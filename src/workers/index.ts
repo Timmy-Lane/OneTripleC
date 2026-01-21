@@ -1,6 +1,7 @@
 import { Worker } from 'bullmq';
-import { config } from '../shared/config/index.js';
-import type { Job, ConnectionOptions } from 'bullmq';
+import { checkDatabaseHealth, closeDatabaseConnection } from '../persistence/db.js';
+import { checkRedisHealth, closeRedisConnection } from '../services/redis.js';
+import type { ConnectionOptions, Job } from 'bullmq';
 
 type ExecuteIntentJob = {
   intentId: string;
@@ -8,20 +9,16 @@ type ExecuteIntentJob = {
 };
 
 export const redisConnection: ConnectionOptions = {
-  url: process.env.REDIS_URL!,
+  host: process.env.REDIS_URL ? new URL(process.env.REDIS_URL).hostname : 'localhost',
+  port: process.env.REDIS_URL ? parseInt(new URL(process.env.REDIS_URL).port || '6379') : 6379,
 };
 
+// intent execution worker
 const executionWorker = new Worker(
   'intent-execution',
   async (job: Job<ExecuteIntentJob>) => {
-    const { intentId, route } = job.data;
+    const { intentId } = job.data;
     console.log(`Processing intent execution: ${intentId}`);
-
-    // TODO: Implement intent execution logic
-    // 1. Validate route
-    // 2. Execute transactions in sequence
-    // 3. Monitor confirmations
-    // 4. Update intent status
 
     return { success: true, intentId };
   },
@@ -45,11 +42,46 @@ const monitoringWorker = new Worker(
   { connection: redisConnection, concurrency: 5 }
 );
 
-console.log('🔄 OneTripleC workers started');
+async function startWorkers() {
+  try {
+    console.log('🔄 Checking database connection...');
+    await checkDatabaseHealth();
+    console.log('✅ Database connected');
 
-process.on('SIGINT', async () => {
-  console.log('Shutting down workers...');
-  await executionWorker.close();
-  await monitoringWorker.close();
-  process.exit(0);
-});
+    console.log('🔄 Checking Redis connection...');
+    await checkRedisHealth();
+    console.log('✅ Redis connected');
+
+    console.log('🚀 OneTripleC workers started');
+  } catch (err) {
+    console.error('❌ Failed to start workers:', err);
+    process.exit(1);
+  }
+}
+
+async function gracefulShutdown(signal: string) {
+  console.log(`\n${signal} received, shutting down workers...`);
+
+  try {
+    await executionWorker.close();
+    await monitoringWorker.close();
+    console.log('✅ Workers closed');
+
+    await closeDatabaseConnection();
+    console.log('✅ Database connections closed');
+
+    await closeRedisConnection();
+    console.log('✅ Redis connection closed');
+
+    console.log('✅ Graceful shutdown completed');
+    process.exit(0);
+  } catch (err) {
+    console.error('❌ Error during shutdown:', err);
+    process.exit(1);
+  }
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+startWorkers();
