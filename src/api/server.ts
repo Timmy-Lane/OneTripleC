@@ -2,14 +2,26 @@ import { fastify } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
+import crypto from 'crypto';
 import { config } from '../shared/config/index.js';
-import { checkDatabaseHealth, closeDatabaseConnection } from '../persistence/db.js';
-import { checkRedisHealth, closeRedisConnection } from '../services/redis.js';
+import {
+  checkDatabaseHealth,
+  closeDatabaseConnection,
+  setLogger as setDbLogger,
+} from '../persistence/db.js';
+import {
+  checkRedisHealth,
+  closeRedisConnection,
+  setLogger as setRedisLogger,
+} from '../services/redis.js';
 
 const app = fastify({
   logger: {
     level: config.LOG_LEVEL,
   },
+  requestIdHeader: 'x-request-id',
+  requestIdLogLabel: 'reqId',
+  genReqId: () => crypto.randomUUID(),
 });
 
 let isShuttingDown = false;
@@ -25,19 +37,59 @@ async function registerPlugins() {
   });
 }
 
-// API docs
-// await app.register(swagger, {
-//   openapi: {
-//     info: {
-//       title: 'OneTripleC API',
-//       version: '1.0.0',
-//     },
-//   },
-// });
+function registerHooks() {
+  app.addHook('onRequest', async (request) => {
+    request.log.info(
+      {
+        reqId: request.id,
+        method: request.method,
+        url: request.url,
+      },
+      'Request received'
+    );
+  });
 
-// await app.register(swaggerUi, {
-//   routePrefix: '/docs',
-// });
+  app.addHook('onResponse', async (request, reply) => {
+    request.log.info(
+      {
+        reqId: request.id,
+        method: request.method,
+        url: request.url,
+        statusCode: reply.statusCode,
+        responseTime: reply.elapsedTime,
+      },
+      'Request completed'
+    );
+  });
+}
+
+function registerErrorHandler() {
+  app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, request, reply) => {
+    request.log.error(
+      {
+        err: error,
+        reqId: request.id,
+        method: request.method,
+        url: request.url,
+      },
+      'Request failed'
+    );
+
+    const statusCode = error.statusCode || 500;
+    const isClientError = statusCode >= 400 && statusCode < 500;
+
+    return reply.status(statusCode).send({
+      error: {
+        message: isClientError ? error.message : 'Internal server error',
+        code: error.code || 'INTERNAL_ERROR',
+        statusCode,
+        ...(config.LOG_LEVEL === 'debug' && !isClientError && {
+          stack: error.stack,
+        }),
+      },
+    });
+  });
+}
 
 function registerRoutes() {
   app.get('/health', async (request, reply) => {
@@ -61,7 +113,8 @@ function registerRoutes() {
         },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
       app.log.error({ error: errorMessage }, 'Health check failed');
       return reply.status(503).send({
         status: 'unhealthy',
@@ -75,23 +128,23 @@ function registerRoutes() {
 // TODO: Register route modules here
 
 async function gracefulShutdown(signal: string) {
-  console.log(`\n${signal} received, starting graceful shutdown...`);
+  app.log.info(`${signal} received, starting graceful shutdown...`);
   isShuttingDown = true;
 
   try {
     await app.close();
-    console.log('✅ Fastify server closed');
+    app.log.info('Fastify server closed');
 
     await closeDatabaseConnection();
-    console.log('✅ Database connections closed');
+    app.log.info('Database connections closed');
 
     await closeRedisConnection();
-    console.log('✅ Redis connection closed');
+    app.log.info('Redis connection closed');
 
-    console.log('✅ Graceful shutdown completed');
+    app.log.info('Graceful shutdown completed');
     process.exit(0);
   } catch (err) {
-    console.error('❌ Error during shutdown:', err);
+    app.log.error({ err }, 'Error during shutdown');
     process.exit(1);
   }
 }
@@ -99,29 +152,49 @@ async function gracefulShutdown(signal: string) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+process.on('uncaughtException', (err) => {
+  app.log.fatal({ err }, 'Uncaught exception');
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+process.on('unhandledRejection', (reason) => {
+  app.log.fatal({ reason }, 'Unhandled promise rejection');
+  gracefulShutdown('UNHANDLED_REJECTION');
+});
+
 const start = async () => {
   try {
-    console.log('🔄 Checking database connection...');
+    setDbLogger(app.log);
+    setRedisLogger(app.log);
+
+    app.log.info('Checking database connection...');
     await checkDatabaseHealth();
-    console.log('✅ Database connected');
+    app.log.info('Database connected');
 
-    console.log('🔄 Checking Redis connection...');
+    app.log.info('Checking Redis connection...');
     await checkRedisHealth();
-    console.log('✅ Redis connected');
+    app.log.info('Redis connected');
 
-    console.log('🔄 Registering Fastify plugins...');
+    app.log.info('Registering Fastify plugins...');
     await registerPlugins();
-    console.log('✅ Plugins registered');
+    app.log.info('Plugins registered');
 
-    console.log('🔄 Registering routes...');
+    app.log.info('Registering hooks...');
+    registerHooks();
+    app.log.info('Hooks registered');
+
+    app.log.info('Registering error handler...');
+    registerErrorHandler();
+    app.log.info('Error handler registered');
+
+    app.log.info('Registering routes...');
     registerRoutes();
-    console.log('✅ Routes registered');
+    app.log.info('Routes registered');
 
     await app.listen({ port: config.PORT, host: '0.0.0.0' });
-    console.log(`🚀 OneTripleC API listening on port ${config.PORT}`);
+    app.log.info({ port: config.PORT }, 'OneTripleC API listening');
   } catch (err) {
-    console.error('❌ Failed to start server:', err);
-    app.log.error(err);
+    app.log.fatal({ err }, 'Failed to start server');
     process.exit(1);
   }
 };

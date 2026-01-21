@@ -1,8 +1,14 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
+import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../shared/config/index.js';
 
 let pool: Pool | null = null;
+let logger: FastifyBaseLogger | null = null;
+
+export function setLogger(loggerInstance: FastifyBaseLogger): void {
+  logger = loggerInstance;
+}
 
 export function getPool(): Pool {
   if (!pool) {
@@ -14,7 +20,11 @@ export function getPool(): Pool {
     });
 
     pool.on('error', (err) => {
-      console.error('Unexpected database pool error:', err);
+      if (logger) {
+        logger.error({ err }, 'Unexpected database pool error');
+      } else {
+        console.error({ err }, 'Unexpected database pool error');
+      }
     });
   }
   return pool;
@@ -27,9 +37,14 @@ export async function checkDatabaseHealth(): Promise<void> {
   try {
     await client.query('SELECT 1');
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('❌ Database health check failed:', errorMessage);
-    throw new Error(`Database connection failed: ${errorMessage}`);
+    if (logger) {
+      logger.error({ error }, 'Database health check failed');
+    } else {
+      console.error({ error }, 'Database health check failed');
+    }
+    throw new Error(
+      `Database connection failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   } finally {
     client.release();
   }

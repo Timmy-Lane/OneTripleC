@@ -1,6 +1,12 @@
 import Redis from 'ioredis';
+import type { FastifyBaseLogger } from 'fastify';
 
 let redisClient: Redis | null = null;
+let logger: FastifyBaseLogger | null = null;
+
+export function setLogger(loggerInstance: FastifyBaseLogger): void {
+  logger = loggerInstance;
+}
 
 export function getRedisClient(): Redis {
   if (!redisClient) {
@@ -20,11 +26,19 @@ export function getRedisClient(): Redis {
     });
 
     redisClient.on('error', (err) => {
-      console.error('Redis connection error:', err);
+      if (logger) {
+        logger.error({ err }, 'Redis connection error');
+      } else {
+        console.error({ err }, 'Redis connection error');
+      }
     });
 
     redisClient.on('connect', () => {
-      console.log('✅ Redis connected');
+      if (logger) {
+        logger.info('Redis connected');
+      } else {
+        console.log('Redis connected');
+      }
     });
   }
   return redisClient;
@@ -35,9 +49,14 @@ export async function checkRedisHealth(): Promise<void> {
   try {
     await client.ping();
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('❌ Redis health check failed:', errorMessage);
-    throw new Error(`Redis connection failed: ${errorMessage}`);
+    if (logger) {
+      logger.error({ error }, 'Redis health check failed');
+    } else {
+      console.error({ error }, 'Redis health check failed');
+    }
+    throw new Error(
+      `Redis connection failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 
