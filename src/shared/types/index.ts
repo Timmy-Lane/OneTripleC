@@ -1,44 +1,85 @@
-import { z } from 'zod';
+export enum ChainId {
+  ETHEREUM = 1,
+  BASE = 8453,
+  ARBITRUM = 42161,
+  OPTIMISM = 10,
+  POLYGON = 137,
+}
 
-// Chain types
-export const ChainSchema = z.enum(['ethereum', 'base', 'arbitrum']);
-export type Chain = z.infer<typeof ChainSchema>;
+export enum IntentState {
+  CREATED = 'CREATED',
+  QUOTED = 'QUOTED',
+  EXECUTING = 'EXECUTING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+  CANCELLED = 'CANCELLED',
+}
 
-// Intent status types  
-export const IntentStatusSchema = z.enum([
-  'pending',
-  'routing',
-  'executing', 
-  'completed',
-  'failed',
-  'cancelled'
-]);
-export type IntentStatus = z.infer<typeof IntentStatusSchema>;
+export enum ExecutionState {
+  PENDING = 'PENDING',
+  IN_PROGRESS = 'IN_PROGRESS',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+}
 
-// Intent schema
-export const IntentSchema = z.object({
-  id: z.string().uuid(),
-  userId: z.string(),
-  sourceChain: ChainSchema,
-  targetChain: ChainSchema,
-  sourceToken: z.string(), // Token address
-  targetToken: z.string(), // Token address
-  sourceAmount: z.string(), // BigNumber as string
-  minTargetAmount: z.string().optional(), // Minimum acceptable output
-  status: IntentStatusSchema,
-  route: z.any().optional(), // Execution route details
-  txHashes: z.array(z.string()).default([]),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-});
+export enum TxState {
+  PENDING = 'PENDING',
+  SUBMITTED = 'SUBMITTED',
+  CONFIRMED = 'CONFIRMED',
+  FAILED = 'FAILED',
+}
 
-export type Intent = z.infer<typeof IntentSchema>;
+export enum RouteStepType {
+  SWAP = 'SWAP',
+  BRIDGE = 'BRIDGE',
+}
 
-// Worker job types
-export const JobTypeSchema = z.enum([
-  'EXECUTE_INTENT',
-  'MONITOR_TRANSACTION', 
-  'SEND_NOTIFICATION',
-  'PROCESS_REFUND'
-]);
-export type JobType = z.infer<typeof JobTypeSchema>;
+export interface Intent {
+  id: string;
+  userId: string;
+  sourceChainId: ChainId;
+  targetChainId: ChainId;
+  sourceToken: string;
+  targetToken: string;
+  sourceAmount: string;
+  minTargetAmount: string | null;
+  state: IntentState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Quote {
+  id: string;
+  intentId: string;
+  estimatedOutput: string;
+  estimatedGasCost: string;
+  route: RouteStep[];
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface Execution {
+  id: string;
+  intentId: string;
+  quoteId: string;
+  state: ExecutionState;
+  startedAt: string;
+  completedAt: string | null;
+  failureReason: string | null;
+}
+
+export interface RouteStep {
+  type: RouteStepType;
+  chainId: ChainId;
+  protocol: string;
+  fromToken: string;
+  toToken: string;
+  fromAmount: string;
+  toAmount: string;
+  dexAddress: string | null;
+  bridgeAddress: string | null;
+  txHash: string | null;
+  txState: TxState;
+  gasUsed: string | null;
+  error: string | null;
+}

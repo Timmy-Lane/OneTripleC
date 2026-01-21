@@ -27,7 +27,7 @@ export class IntentService {
 
   async updateIntentStatus(
     _intentId: string, 
-    _status: Intent['status'],
+    _status: Intent['state'],
     _metadata?: Record<string, unknown>
   ): Promise<void> {
     throw new Error('Not implemented');
