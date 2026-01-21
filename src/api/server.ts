@@ -26,7 +26,6 @@ await app.register(swagger, {
   openapi: {
     info: {
       title: 'OneTripleC API',
-      description: 'Telegram-first cross-chain intent execution platform',
       version: '1.0.0',
     },
   },
