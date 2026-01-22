@@ -1,6 +1,6 @@
 ---
 description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
+globs: '*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json'
 alwaysApply: false
 ---
 
@@ -23,6 +23,8 @@ Default to using Bun instead of Node.js.
 - `WebSocket` is built-in. Don't use `ws`.
 - Prefer `Bun.file` over `node:fs`'s readFile/writeFile
 - Bun.$`ls` instead of execa.
+
+Always use Context7 MCP when I need library/API documentation, code generation, setup or configuration steps without me having to explicitly ask.
 
 ## Testing
 

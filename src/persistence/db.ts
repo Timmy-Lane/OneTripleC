@@ -2,6 +2,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import type { FastifyBaseLogger } from 'fastify';
 import { config } from '../shared/config/index.js';
+import * as schema from './models/schema.js';
 
 let pool: Pool | null = null;
 let logger: FastifyBaseLogger | null = null;
@@ -30,7 +31,7 @@ export function getPool(): Pool {
   return pool;
 }
 
-export const db = drizzle(getPool());
+export const db = drizzle(getPool(), { schema });
 
 export async function checkDatabaseHealth(): Promise<void> {
   const client = await getPool().connect();

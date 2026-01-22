@@ -32,4 +32,3 @@ temp/
 .cache/
 *.tmp
 *.bak
-*.mcp.json
