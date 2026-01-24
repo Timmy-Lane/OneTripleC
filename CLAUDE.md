@@ -9,6 +9,7 @@ alwaysApply: true
 ## System Overview
 
 OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution platform.
+
 - Primary interface: Telegram bot
 - Minimal frontend: WebApp for confirmations only
 - Core product: Backend orchestration of cross-chain transactions
@@ -16,6 +17,7 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 ## Technology Stack
 
 ### Runtime & Tooling
+
 - **Runtime**: Bun (not Node.js)
   - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
   - Use `bun test` instead of `jest` or `vitest`
@@ -24,6 +26,7 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
   - Bun automatically loads `.env` (no dotenv needed)
 
 ### Core Stack
+
 - **HTTP Server**: Fastify (not Express, not Bun.serve)
   - Reason: Production-grade plugins (rate-limit, swagger, helmet)
   - Fastify is battle-tested for high-throughput APIs
@@ -40,62 +43,77 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 ## Architectural Layers
 
 ### 1. API Layer (`src/api/`)
+
 **Responsibility**: HTTP transport and orchestration
+
 - Thin controllers that validate input and delegate to domain services
 - Expose REST endpoints for Telegram bot and WebApp
 - Return HTTP errors, never throw unhandled exceptions
 - **Does NOT contain business logic**
 
 **Key files**:
+
 - `server.ts`: Fastify setup, plugin registration, health checks
 - `routes/`: One file per domain (intents, quotes, executions, users)
 - `middleware/`: Auth, rate-limiting, error handling
 - `schemas/`: Zod schemas for request/response validation
 
 ### 2. Domain Layer (`src/domain/`)
+
 **Responsibility**: Pure business logic (framework-agnostic)
+
 - Orchestrates workflows (parse intent → fetch quotes → build execution)
 - Stateless services, no direct DB or API knowledge
 - Depends ONLY on repositories and adapters (via interfaces)
 - **Does NOT know about HTTP or Workers**
 
 **Key files**:
+
 - `intents/intent-service.ts`: Intent lifecycle orchestration
 - `routing/quote-service.ts`: Quote fetching and ranking
 - `execution/execution-service.ts`: Transaction building and submission
 - `state/state-machine.ts`: Intent state transitions
 
 ### 3. Persistence Layer (`src/persistence/`)
+
 **Responsibility**: Database access (PostgreSQL)
+
 - Repository pattern: one repository per aggregate root
 - Only executes queries, no business logic
 - Uses Drizzle ORM for type-safe queries
 
 **Key files**:
+
 - `db.ts`: Drizzle client setup
 - `models/schema.ts`: Database schema (tables, enums, indexes)
 - `repositories/`: CRUD operations per entity
 
 ### 4. Workers Layer (`src/workers/`)
+
 **Responsibility**: Background job processing (BullMQ)
+
 - Dequeue jobs from Redis
 - Orchestrate domain services
 - Handle retries and error logging
 - Update job progress
 
 **Key files**:
+
 - `index.ts`: Worker initialization
 - `execution/`: Intent parsing, quote fetching, execution
 - `monitoring/`: Transaction monitoring, quote expiry
 - `notifications/`: Telegram notifications
 
 ### 5. Adapters Layer (`src/adapters/`)
+
 **Responsibility**: External service clients
+
 - Abstract external APIs behind interfaces
 - Called by domain services, not directly by API or workers
 - Retry logic and error mapping
 
 **Key files**:
+
 - `blockchain/`: Viem clients, transaction submission
 - `dex/`: Uniswap, 1inch, 0x adapters
 - `bridge/`: Across, Stargate adapters
@@ -104,6 +122,7 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 ## Data Flow
 
 ### Telegram → Create Intent
+
 1. Bot sends `POST /intents` with raw message
 2. API validates, persists intent (state: `CREATED`), enqueues `parse-intent` job
 3. Worker dequeues, calls `IntentService.parseIntent()`, updates state to `PARSED`
@@ -112,6 +131,7 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 6. Bot polls `GET /intents/:id`, shows quotes to user
 
 ### Confirm Intent → Execute
+
 1. User confirms via Telegram
 2. Bot sends `POST /intents/:id/confirm`
 3. API validates quote, updates state to `ACCEPTED`, enqueues `execute-intent` job
@@ -136,11 +156,13 @@ src/
 ## State Management
 
 ### PostgreSQL (Source of Truth)
+
 - All entities: users, intents, quotes, orders, executions, transactions
 - Atomic updates with transactions
 - Indexed for fast queries (see `schema.ts`)
 
 ### Redis (Ephemeral)
+
 - Job queues (BullMQ)
 - Session state (Telegram chat context)
 - Rate-limiting counters
@@ -149,23 +171,27 @@ src/
 ## Naming Conventions
 
 ### Files
+
 - Kebab-case: `intent-service.ts`, `quote-repository.ts`
 - One class per file, filename = class name
 - Suffix by type: `-service.ts`, `-repository.ts`, `-adapter.ts`, `-worker.ts`
 
 ### Code
+
 - Interfaces: `PascalCase` (e.g., `IntentService`)
 - Functions: `camelCase` (e.g., `parseIntent`)
 - Constants: `SCREAMING_SNAKE_CASE` (e.g., `MAX_RETRIES`)
 - Database columns: `snake_case` (e.g., `source_chain_id`)
 
 ### Routes
+
 - RESTful: `/intents`, `/intents/:id`, `/intents/:id/confirm`
 - Use nouns, not verbs: `/intents/:id/cancel` (not `/cancelIntent`)
 
 ## Error Handling
 
 ### API Layer
+
 - Return HTTP errors with status codes
 - Map domain errors to HTTP errors:
   - `IntentValidationError` → 400
@@ -174,10 +200,12 @@ src/
   - All others → 500
 
 ### Domain Layer
+
 - Throw typed errors: `IntentValidationError`, `QuoteExpiredError`, `ExecutionFailedError`
 - Never catch errors (let API/Workers handle)
 
 ### Workers
+
 - Catch all errors, log, update job state
 - Retry with exponential backoff (BullMQ handles this)
 - Mark job as failed after max retries
@@ -185,16 +213,19 @@ src/
 ## Testing Strategy
 
 ### Unit Tests
+
 - Test domain services in isolation
 - Mock repositories and adapters
 - Use `bun test`
 
 ### Integration Tests
+
 - Test API routes with real DB (test schema)
 - Test workers with real Redis (local instance)
 - Use factories for test data
 
 ### E2E Tests (Future)
+
 - Test Telegram → API → Worker → Blockchain flow
 - Use testnet RPCs
 - Mock Telegram webhook
@@ -202,6 +233,7 @@ src/
 ## Development Workflow
 
 ### Local Setup
+
 ```bash
 bun install
 docker-compose up -d  # PostgreSQL + Redis
@@ -211,6 +243,7 @@ bun run worker:start  # Start workers
 ```
 
 ### Linting & Type Checking
+
 ```bash
 bun run lint          # ESLint
 bun run typecheck     # TypeScript
@@ -218,6 +251,7 @@ bun run format:check  # Prettier
 ```
 
 ### Database Migrations
+
 ```bash
 bun run db:generate   # Generate migration from schema changes
 bun run db:migrate    # Apply migrations
@@ -227,16 +261,19 @@ bun run db:studio     # Open Drizzle Studio
 ## Production Considerations
 
 ### Deployment
+
 - API and Workers are separate processes
 - Scale API horizontally (stateless)
 - Scale workers by queue (e.g., 5 execution workers, 10 monitoring workers)
 
 ### Monitoring
+
 - Health checks: `/health` (DB + Redis)
 - Metrics: BullMQ queue depth, job latency
 - Logs: Structured JSON (Pino), sent to log aggregator
 
 ### Security
+
 - Rate limiting per Telegram user
 - Telegram auth validation (webhook signature)
 - Private key management (env vars, secrets manager)
@@ -244,20 +281,24 @@ bun run db:studio     # Open Drizzle Studio
 ## Decision Log
 
 ### Why Fastify over Bun.serve?
+
 - Fastify has mature plugin ecosystem (swagger, rate-limit, helmet)
 - Bun.serve is great for simple apps, but Fastify is battle-tested
 
 ### Why Workers?
+
 - API must respond quickly (<200ms)
 - Blockchain queries take seconds
 - Workers handle long-running tasks asynchronously
 
 ### Why Repositories?
+
 - Decouple domain logic from Drizzle ORM
 - Easy to mock for testing
 - Single place to change queries
 
 ### Why Adapters?
+
 - External APIs change (DEXs, bridges)
 - Adapters abstract API details
 - Easy to swap implementations
@@ -267,23 +308,22 @@ bun run db:studio     # Open Drizzle Studio
 Bun supports HTML imports for the confirmation WebApp:
 
 ```ts
-import index from "./index.html"
+import index from './index.html';
 
 Bun.serve({
   routes: {
-    "/": index,
+    '/': index,
   },
   development: {
     hmr: true,
-  }
-})
+  },
+});
 ```
 
 HTML files can import `.tsx` files directly. Bun bundles automatically.
 
 ---
 
-<<<<<<< Updated upstream
 With the following `frontend.tsx`:
 
 ```tsx#frontend.tsx
@@ -326,19 +366,19 @@ CANCELLED CANCELLED CANCELLED   EXPIRED       EXPIRED   CANCELLED
 
 ### Intent States
 
-| State | Description |
-|-------|-------------|
-| CREATED | Intent received from user, awaiting parsing |
-| PARSING | Worker is parsing the raw message |
-| PARSED | Intent successfully parsed, ready for quote |
-| QUOTE_REQUESTED | Quotes being fetched (future) |
-| QUOTED | Quotes available for user review (future) |
-| ACCEPTED | User accepted a quote (future) |
-| EXECUTING | Transaction being executed (future) |
-| COMPLETED | Intent fully executed |
-| FAILED | Error occurred at any stage |
-| CANCELLED | User cancelled the intent |
-| EXPIRED | Quote or intent expired |
+| State           | Description                                 |
+| --------------- | ------------------------------------------- |
+| CREATED         | Intent received from user, awaiting parsing |
+| PARSING         | Worker is parsing the raw message           |
+| PARSED          | Intent successfully parsed, ready for quote |
+| QUOTE_REQUESTED | Quotes being fetched (future)               |
+| QUOTED          | Quotes available for user review (future)   |
+| ACCEPTED        | User accepted a quote (future)              |
+| EXECUTING       | Transaction being executed (future)         |
+| COMPLETED       | Intent fully executed                       |
+| FAILED          | Error occurred at any stage                 |
+| CANCELLED       | User cancelled the intent                   |
+| EXPIRED         | Quote or intent expired                     |
 
 ### Flow
 
@@ -356,13 +396,13 @@ CANCELLED CANCELLED CANCELLED   EXPIRED       EXPIRED   CANCELLED
 
 ### Files
 
-| Component | Path |
-|-----------|------|
-| API Routes | `src/api/routes/intents.ts` |
-| Domain Service | `src/domain/intents/intent-service.ts` |
-| Repository | `src/persistence/repositories/intent-repository.ts` |
-| Queue Service | `src/services/queue.ts` |
-| Worker | `src/workers/index.ts` |
+| Component      | Path                                                |
+| -------------- | --------------------------------------------------- |
+| API Routes     | `src/api/routes/intents.ts`                         |
+| Domain Service | `src/domain/intents/intent-service.ts`              |
+| Repository     | `src/persistence/repositories/intent-repository.ts` |
+| Queue Service  | `src/services/queue.ts`                             |
+| Worker         | `src/workers/index.ts`                              |
 
 ### Running Locally
 
@@ -388,6 +428,3 @@ curl -X POST http://localhost:3000/intents \
 # Check intent status
 curl http://localhost:3000/intents/INTENT_ID
 ```
-=======
-**Always use Context7 MCP for library/API documentation.**
->>>>>>> Stashed changes
