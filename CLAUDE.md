@@ -111,3 +111,82 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Intent Lifecycle
+
+The system processes user intents through a state machine:
+
+### State Transitions
+
+```
+CREATED → PARSING → PARSED → QUOTE_REQUESTED → QUOTED → ACCEPTED → EXECUTING → COMPLETED
+    ↓         ↓        ↓           ↓              ↓          ↓           ↓
+  FAILED   FAILED   FAILED      FAILED         FAILED     FAILED      FAILED
+    ↓         ↓        ↓           ↓              ↓          ↓
+CANCELLED CANCELLED CANCELLED   EXPIRED       EXPIRED   CANCELLED
+```
+
+### Intent States
+
+| State | Description |
+|-------|-------------|
+| CREATED | Intent received from user, awaiting parsing |
+| PARSING | Worker is parsing the raw message |
+| PARSED | Intent successfully parsed, ready for quote |
+| QUOTE_REQUESTED | Quotes being fetched (future) |
+| QUOTED | Quotes available for user review (future) |
+| ACCEPTED | User accepted a quote (future) |
+| EXECUTING | Transaction being executed (future) |
+| COMPLETED | Intent fully executed |
+| FAILED | Error occurred at any stage |
+| CANCELLED | User cancelled the intent |
+| EXPIRED | Quote or intent expired |
+
+### Flow
+
+1. **API** (`POST /intents`): Creates intent in `CREATED` state, enqueues `parse-intent` job
+2. **Worker**: Picks up job, transitions `CREATED → PARSING → PARSED` (or `FAILED`)
+3. **Worker**: On success, enqueues `fetch-quotes` job (stub)
+4. **API** (`GET /intents/:id`): Returns current intent state
+
+### Queue Architecture
+
+- **Queue Name**: `intent-queue`
+- **Job Types**:
+  - `parse-intent`: Parse raw message to extract intent fields
+  - `fetch-quotes`: Fetch quotes from DEXs/bridges (stub)
+
+### Files
+
+| Component | Path |
+|-----------|------|
+| API Routes | `src/api/routes/intents.ts` |
+| Domain Service | `src/domain/intents/intent-service.ts` |
+| Repository | `src/persistence/repositories/intent-repository.ts` |
+| Queue Service | `src/services/queue.ts` |
+| Worker | `src/workers/index.ts` |
+
+### Running Locally
+
+```sh
+# Start dependencies
+docker compose up -d
+
+# Run API server
+bun run src/api/server.ts
+
+# Run workers (in separate terminal)
+bun run src/workers/index.ts
+```
+
+### Testing the Flow
+
+```sh
+# Create an intent (replace USER_ID with a valid user UUID)
+curl -X POST http://localhost:3000/intents \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "USER_ID", "rawMessage": "swap 100 USDC to ETH"}'
+
+# Check intent status
+curl http://localhost:3000/intents/INTENT_ID
+```

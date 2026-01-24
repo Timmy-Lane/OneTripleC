@@ -8,11 +8,16 @@ export enum ChainId {
 
 export enum IntentState {
   CREATED = 'CREATED',
+  PARSING = 'PARSING',
+  PARSED = 'PARSED',
+  QUOTE_REQUESTED = 'QUOTE_REQUESTED',
   QUOTED = 'QUOTED',
+  ACCEPTED = 'ACCEPTED',
   EXECUTING = 'EXECUTING',
   COMPLETED = 'COMPLETED',
   FAILED = 'FAILED',
   CANCELLED = 'CANCELLED',
+  EXPIRED = 'EXPIRED',
 }
 
 export enum ExecutionState {
@@ -37,13 +42,17 @@ export enum RouteStepType {
 export interface Intent {
   id: string;
   userId: string;
-  sourceChainId: ChainId;
-  targetChainId: ChainId;
-  sourceToken: string;
-  targetToken: string;
-  sourceAmount: string;
+  rawMessage: string;
+  sourceChainId: ChainId | null;
+  targetChainId: ChainId | null;
+  sourceToken: string | null;
+  targetToken: string | null;
+  sourceAmount: string | null;
   minTargetAmount: string | null;
+  slippageBps: number | null;
+  parsingConfidence: string | null;
   state: IntentState;
+  errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
 }

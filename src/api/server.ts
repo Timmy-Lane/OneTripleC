@@ -14,6 +14,8 @@ import {
   closeRedisConnection,
   setLogger as setRedisLogger,
 } from '../services/redis.js';
+import { registerIntentRoutes } from './routes/intents.js';
+import { closeIntentQueue } from '../services/queue.js';
 
 const app = fastify({
   logger: {
@@ -124,8 +126,11 @@ function registerRoutes() {
   });
 }
 
-// API routes
-// TODO: Register route modules here
+async function registerApiRoutes() {
+  // Intent API routes
+  await registerIntentRoutes(app);
+  app.log.info('Intent routes registered');
+}
 
 async function gracefulShutdown(signal: string) {
   app.log.info(`${signal} received, starting graceful shutdown...`);
@@ -134,6 +139,9 @@ async function gracefulShutdown(signal: string) {
   try {
     await app.close();
     app.log.info('Fastify server closed');
+
+    await closeIntentQueue();
+    app.log.info('Intent queue closed');
 
     await closeDatabaseConnection();
     app.log.info('Database connections closed');
@@ -189,7 +197,11 @@ const start = async () => {
 
     app.log.info('Registering routes...');
     registerRoutes();
-    app.log.info('Routes registered');
+    app.log.info('Health routes registered');
+
+    app.log.info('Registering API routes...');
+    await registerApiRoutes();
+    app.log.info('API routes registered');
 
     await app.listen({ port: config.PORT, host: '0.0.0.0' });
     app.log.info({ port: config.PORT }, 'OneTripleC API listening');
