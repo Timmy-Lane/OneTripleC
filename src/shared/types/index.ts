@@ -10,20 +10,19 @@ export enum IntentState {
   CREATED = 'CREATED',
   PARSING = 'PARSING',
   PARSED = 'PARSED',
-  QUOTE_REQUESTED = 'QUOTE_REQUESTED',
   QUOTED = 'QUOTED',
   ACCEPTED = 'ACCEPTED',
   EXECUTING = 'EXECUTING',
   COMPLETED = 'COMPLETED',
   FAILED = 'FAILED',
   CANCELLED = 'CANCELLED',
-  EXPIRED = 'EXPIRED',
 }
 
 export enum ExecutionState {
   PENDING = 'PENDING',
-  IN_PROGRESS = 'IN_PROGRESS',
-  COMPLETED = 'COMPLETED',
+  SUBMITTED = 'SUBMITTED',
+  CONFIRMING = 'CONFIRMING',
+  CONFIRMED = 'CONFIRMED',
   FAILED = 'FAILED',
 }
 
@@ -48,9 +47,6 @@ export interface Intent {
   sourceToken: string | null;
   targetToken: string | null;
   sourceAmount: string | null;
-  minTargetAmount: string | null;
-  slippageBps: number | null;
-  parsingConfidence: string | null;
   state: IntentState;
   errorMessage: string | null;
   createdAt: string;

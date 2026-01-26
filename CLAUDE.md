@@ -153,11 +153,80 @@ src/
 └── shared/               # Config, types, utils, constants
 ```
 
+## V1 Database Philosophy
+
+OneTripleC's database follows these principles:
+
+### 1. Minimal Persistence
+- PostgreSQL is the source of truth for **user actions** and **runtime config**
+- Redis is ephemeral (queues, coordination)
+- Blockchain is the source of truth for **transaction state**
+
+### 2. Execution-Focused
+- **Execution** is the core business unit
+- One execution = one logical user action = one or more blockchain transactions
+- Store `tx_hash`, not transaction details (fetch via RPC on demand)
+
+### 3. No Premature Optimization
+- No route caching (learned routes)
+- No balance caching (always fetch from RPC)
+- No protocol registries (hardcode in adapters)
+- No per-transaction persistence (store final tx_hash only)
+
+### Allowed Tables
+
+| Table | Purpose | Status |
+|-------|---------|--------|
+| users | Telegram identity | REQUIRED |
+| intents | Intent lifecycle | REQUIRED |
+| quotes | Route options | REQUIRED |
+| executions | Execution tracking | REQUIRED |
+| chains | Runtime chain config | REQUIRED |
+| tokens | Token metadata | ALLOWED (optional) |
+
+### Forbidden Tables
+
+| Table | Why Forbidden | Alternative |
+|-------|---------------|-------------|
+| orders | Redundant with executions | Use `executions` |
+| execution_steps | Over-engineering | Store in `quotes.route` JSON |
+| transactions | Duplicates blockchain data | Fetch via RPC using `tx_hash` |
+| execution_logs | Logs don't belong in DB | Structured logs (Pino) |
+| fee_breakdowns | Redundant accounting | Compute from `quotes.route.fees` |
+| balances | Cached RPC data | Query RPC on demand |
+| sessions | Ephemeral state | Use Redis |
+| routes | Premature optimization | Fetch quotes on demand |
+| dexes | Protocol config | Hardcode in adapters |
+| bridges | Protocol config | Hardcode in adapters |
+| wallets | No persistent wallet mgmt | Prompt user per execution |
+
+### Rule: Justify New Tables
+
+Before adding a new table, answer:
+
+1. **Can this live in `executions.tx_hash`?**
+   - If it's transaction data, fetch via RPC
+
+2. **Can this live in `quotes.route` JSON?**
+   - If it's execution steps/details, store in route
+
+3. **Can this live in application logs?**
+   - If it's debugging/audit data, use structured logs
+
+4. **Can this live in Redis?**
+   - If it's ephemeral session state, use Redis
+
+5. **Can this live in code/config?**
+   - If it's protocol addresses/constants, hardcode it
+
+If the answer to ALL of these is "no", then justify the new table.
+
 ## State Management
 
 ### PostgreSQL (Source of Truth)
 
-- All entities: users, intents, quotes, orders, executions, transactions
+- Core entities: users, intents, quotes, executions
+- Runtime configuration: chains, tokens
 - Atomic updates with transactions
 - Indexed for fast queries (see `schema.ts`)
 
@@ -357,11 +426,11 @@ The system processes user intents through a state machine:
 ### State Transitions
 
 ```
-CREATED → PARSING → PARSED → QUOTE_REQUESTED → QUOTED → ACCEPTED → EXECUTING → COMPLETED
-    ↓         ↓        ↓           ↓              ↓          ↓           ↓
-  FAILED   FAILED   FAILED      FAILED         FAILED     FAILED      FAILED
-    ↓         ↓        ↓           ↓              ↓          ↓
-CANCELLED CANCELLED CANCELLED   EXPIRED       EXPIRED   CANCELLED
+CREATED → PARSING → PARSED → QUOTED → ACCEPTED → EXECUTING → COMPLETED
+    ↓         ↓        ↓         ↓         ↓           ↓
+  FAILED   FAILED   FAILED   FAILED   FAILED      FAILED
+    ↓         ↓        ↓         ↓
+CANCELLED CANCELLED CANCELLED CANCELLED
 ```
 
 ### Intent States
@@ -371,14 +440,12 @@ CANCELLED CANCELLED CANCELLED   EXPIRED       EXPIRED   CANCELLED
 | CREATED         | Intent received from user, awaiting parsing |
 | PARSING         | Worker is parsing the raw message           |
 | PARSED          | Intent successfully parsed, ready for quote |
-| QUOTE_REQUESTED | Quotes being fetched (future)               |
-| QUOTED          | Quotes available for user review (future)   |
-| ACCEPTED        | User accepted a quote (future)              |
-| EXECUTING       | Transaction being executed (future)         |
+| QUOTED          | Quotes available for user review            |
+| ACCEPTED        | User accepted a quote                       |
+| EXECUTING       | Transaction being executed                  |
 | COMPLETED       | Intent fully executed                       |
 | FAILED          | Error occurred at any stage                 |
 | CANCELLED       | User cancelled the intent                   |
-| EXPIRED         | Quote or intent expired                     |
 
 ### Flow
 
@@ -428,3 +495,5 @@ curl -X POST http://localhost:3000/intents \
 # Check intent status
 curl http://localhost:3000/intents/INTENT_ID
 ```
+
+DO NOT USE EMOJI

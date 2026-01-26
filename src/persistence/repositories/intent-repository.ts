@@ -10,15 +10,13 @@ export type NewIntent = typeof intents.$inferInsert;
 const VALID_TRANSITIONS: Record<string, IntentState[]> = {
   [IntentState.CREATED]: [IntentState.PARSING, IntentState.FAILED, IntentState.CANCELLED],
   [IntentState.PARSING]: [IntentState.PARSED, IntentState.FAILED],
-  [IntentState.PARSED]: [IntentState.QUOTE_REQUESTED, IntentState.FAILED, IntentState.CANCELLED],
-  [IntentState.QUOTE_REQUESTED]: [IntentState.QUOTED, IntentState.FAILED, IntentState.EXPIRED],
-  [IntentState.QUOTED]: [IntentState.ACCEPTED, IntentState.FAILED, IntentState.CANCELLED, IntentState.EXPIRED],
+  [IntentState.PARSED]: [IntentState.QUOTED, IntentState.FAILED, IntentState.CANCELLED],
+  [IntentState.QUOTED]: [IntentState.ACCEPTED, IntentState.FAILED, IntentState.CANCELLED],
   [IntentState.ACCEPTED]: [IntentState.EXECUTING, IntentState.FAILED, IntentState.CANCELLED],
   [IntentState.EXECUTING]: [IntentState.COMPLETED, IntentState.FAILED],
   [IntentState.COMPLETED]: [],
   [IntentState.FAILED]: [],
   [IntentState.CANCELLED]: [],
-  [IntentState.EXPIRED]: [],
 };
 
 export function isValidTransition(from: IntentState, to: IntentState): boolean {
@@ -56,9 +54,6 @@ export async function updateIntentState(
     sourceToken: string;
     targetToken: string;
     sourceAmount: string;
-    minTargetAmount: string;
-    slippageBps: number;
-    parsingConfidence: string;
     errorMessage: string;
   }>
 ): Promise<IntentRow | null> {
@@ -85,9 +80,6 @@ export async function updateIntentWithValidation(
     sourceToken: string;
     targetToken: string;
     sourceAmount: string;
-    minTargetAmount: string;
-    slippageBps: number;
-    parsingConfidence: string;
     errorMessage: string;
   }>
 ): Promise<IntentRow | null> {

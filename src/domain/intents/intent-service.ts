@@ -53,9 +53,6 @@ export interface ParsedIntent {
   sourceToken: string;
   targetToken: string;
   sourceAmount: string;
-  minTargetAmount?: string;
-  slippageBps?: number;
-  parsingConfidence: string;
 }
 
 /**
@@ -154,9 +151,6 @@ export class IntentService {
         sourceToken: parsedData.sourceToken,
         targetToken: parsedData.targetToken,
         sourceAmount: parsedData.sourceAmount,
-        minTargetAmount: parsedData.minTargetAmount,
-        slippageBps: parsedData.slippageBps,
-        parsingConfidence: parsedData.parsingConfidence,
       }
     );
 
@@ -237,9 +231,6 @@ export class IntentService {
       sourceToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC on Ethereum
       targetToken: '0x0000000000000000000000000000000000000000', // Native ETH
       sourceAmount: '100000000', // 100 USDC (6 decimals)
-      minTargetAmount: undefined,
-      slippageBps: 50, // 0.5%
-      parsingConfidence: '0.85',
     };
   }
 
