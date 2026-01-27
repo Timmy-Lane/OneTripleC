@@ -496,4 +496,182 @@ curl -X POST http://localhost:3000/intents \
 curl http://localhost:3000/intents/INTENT_ID
 ```
 
+## DEX Adapters
+
+### Uniswap V2 Adapter
+
+**Location**: `src/adapters/dex/uniswap-v2-adapter.ts`
+
+**Purpose**: Provides production-grade Uniswap V2 (constant product AMM) quote fetching and swap transaction building for OneTripleC.
+
+**Supported Features**:
+- EVM chains only (Ethereum, Base, Arbitrum, Optimism, Polygon)
+- `swapExactTokensForTokens` - user specifies exact input amount
+- Single-hop paths (Token ↔ WETH)
+- Two-hop paths (Token ↔ Intermediate ↔ WETH)
+- Reserves-based quoting (on-chain `getReserves()` calls)
+- Constant product formula: x * y = k
+- 0.3% fee tier (hardcoded)
+
+**Explicit Limitations**:
+- **No auto path discovery**: Pools must be provided by caller
+- **No liquidity checks**: Assumes pool has sufficient liquidity
+- **No price impact calculation**: Uses simple constant product formula
+- **No fee-on-transfer token support**: Standard ERC20 only (no `swapExactTokensForTokensSupportingFeeOnTransferTokens`)
+- **No approval logic**: Handled separately by execution service
+- **No balance checks**: Assumes caller validated sufficient balance
+- **No execution**: Only builds unsigned transaction data
+
+**Architectural Statement**:
+This adapter focuses on the core Uniswap V2 constant product AMM formula. It fetches reserves via multicall for efficiency and applies the `(x * y = k)` formula locally. Unlike V3, V2 does not require a separate Quoter contract—quotes are calculated client-side from reserves.
+
+**Integration**:
+- Implements `DexAdapter` interface
+- Called by `QuoteService` in domain layer
+- Uses `getViemClient()` for blockchain access
+- Uses `getRouterAddress()` from registries
+- Fetches reserves via multicall for multiple pools
+
+**Key Differences from V3**:
+- **Reserves-based**: Fetches `reserve0` and `reserve1` from pair contracts
+- **Local calculation**: Quote math runs client-side (no Quoter contract)
+- **Simpler paths**: No compressed encoding, just token address arrays
+- **Fixed fee**: 0.3% (V2 does not support multiple fee tiers)
+
+**Usage Example**:
+```typescript
+const adapter = new UniswapV2Adapter({
+  chainId: 1,
+  rpcUrl: 'https://eth.llamarpc.com'
+});
+
+const quote = await adapter.getQuote({
+  chainId: 1,
+  fromToken: USDC_ADDRESS,
+  toToken: WETH_ADDRESS,
+  amount: parseUnits('1000', 6),
+  side: 'BUY',
+  slippageBps: 50
+});
+
+const tx = await adapter.buildSwapTransaction(
+  quote,
+  userAddress,
+  50 // 0.5% slippage
+);
+```
+
+### Uniswap V3 Adapter
+
+**Location**: `src/adapters/dex/uniswap-v3-adapter.ts`
+
+**Purpose**: Provides production-grade Uniswap V3 quote fetching and swap transaction building for OneTripleC.
+
+**Supported Features**:
+- EVM chains only (Ethereum, Base, Arbitrum, Optimism, Polygon)
+- `exactInput` swaps ONLY (user specifies input amount)
+- Single-hop paths (Token ↔ WETH)
+- Two-hop paths (Token ↔ Intermediate ↔ WETH)
+- Fixed fee tiers: 500 (0.05%), 3000 (0.3%), 10000 (1%)
+- Quoting via Uniswap V3 Quoter contract (on-chain simulation)
+- Calldata construction via Uniswap V3 SwapRouter
+
+**Explicit Limitations**:
+- **No auto path discovery**: Pools must be provided by caller
+- **No liquidity scanning**: Does not query pool liquidity
+- **No tick math**: Relies on Quoter contract for calculations
+- **No dynamic fee tier search**: Uses default 0.3% (3000) fee tier
+- **No batch quoting**: Single quote per call (batch optimization deferred)
+- **No permit2**: Standard ERC20 approval flow
+- **No approval/allowance logic**: Handled separately by execution service
+- **No balance checks**: Assumes caller validated sufficient balance
+- **No execution**: Only builds unsigned transaction data
+
+**Architectural Statement**:
+This adapter intentionally avoids smart routing and batch quoting. These features belong in higher-level orchestration services. The adapter's role is strictly limited to:
+1. Fetching quotes from Uniswap V3 Quoter
+2. Encoding swap calldata for Uniswap V3 Router
+
+**Integration**:
+- Implements `DexAdapter` interface
+- Called by `QuoteService` in domain layer
+- Uses `getViemClient()` for blockchain access
+- Uses `getRouterAddress()` and `getQuoterAddress()` from registries
+
+**Usage Example**:
+```typescript
+const adapter = new UniswapV3Adapter({
+  chainId: 1,
+  rpcUrl: 'https://eth.llamarpc.com'
+});
+
+const quote = await adapter.getQuote({
+  chainId: 1,
+  fromToken: USDC_ADDRESS,
+  toToken: WETH_ADDRESS,
+  amount: parseUnits('1000', 6),
+  side: 'BUY',
+  slippageBps: 50
+});
+
+const tx = await adapter.buildSwapTransaction(
+  quote,
+  userAddress,
+  50 // 0.5% slippage
+);
+```
+
+## QuoteService Integration
+
+**Location**: `src/domain/routing/quote-service.ts`
+
+**Purpose**: Orchestrates quote fetching from multiple DEX adapters and returns the best available routes.
+
+**Changes in Step 7**:
+- Replaced stub `UniswapAdapter` with real `UniswapV2Adapter` and `UniswapV3Adapter`
+- Now requires `QuoteServiceConfig` with `chainId` and `rpcUrl` for adapter initialization
+- Fetches quotes from both V2 and V3 adapters in parallel
+- Returns all successful quotes (allows caller to select best)
+- Removed singleton pattern - use `createQuoteService(config)` factory function
+
+**Current Behavior**:
+```typescript
+const quoteService = createQuoteService({
+  chainId: 1,
+  rpcUrl: 'https://eth.llamarpc.com'
+});
+
+const quotes = await quoteService.fetchQuotes({
+  sourceChainId: 1,
+  targetChainId: 1,
+  sourceToken: USDC_ADDRESS,
+  targetToken: WETH_ADDRESS,
+  sourceAmount: '1000000000', // 1000 USDC (6 decimals)
+  slippageBps: 50
+});
+
+// Returns: QuoteResult[] with both V2 and V3 quotes (if successful)
+```
+
+**Type Conversions**:
+- Request uses string amounts → converted to `bigint` for adapters
+- Adapters return `bigint` amounts → converted back to strings for API
+- Uses `Address` type from viem for type safety
+
+**Pool Discovery Status**:
+- **Current**: Adapters assume direct pair or single intermediate hop to WETH
+- **Limitation**: Does not query pool contracts to verify existence
+- **TODO**: Add pool discovery service to validate pool addresses before quoting
+- **Workaround**: Adapters derive pool addresses (placeholder logic for MVP)
+
+**Error Handling**:
+- Individual adapter failures don't block other adapters
+- Returns empty array if all adapters fail
+- Logs errors with structured context
+
+**Integration Points**:
+- Called by API routes to fetch quotes for user intents
+- Adapters use `getViemClient()` for blockchain access
+- Future: Add quote ranking/selection logic
+
 DO NOT USE EMOJI
