@@ -42,22 +42,18 @@ const intentWorker = new Worker<IntentJobData>(
 
         case JOB_TYPES.FETCH_QUOTES: {
           const { intentId } = job.data as FetchQuotesJobData;
-          console.log(`[Worker] Processing fetch-quotes for: ${intentId} (STUB)`);
+          console.log(`[Worker] Processing fetch-quotes for: ${intentId}`);
 
-          // STUB: fetch-quotes is not implemented yet
-          // This job is enqueued after successful parsing
-          // In real implementation, this would:
-          // 1. Fetch quotes from DEXs/bridges
-          // 2. Update intent state to QUOTED
-          // 3. Notify user of available quotes
+          const result = await intentService.fetchQuotesForIntent(intentId);
 
           console.log(
-            `[Worker] fetch-quotes stubbed for ${intentId} - no action taken`
+            `[Worker] fetch-quotes completed for ${intentId}: quotes=${result.quotesCreated}, state=${result.state}`
           );
           return {
             success: true,
             intentId,
-            stubbed: true,
+            quotesCreated: result.quotesCreated,
+            state: result.state,
             duration: Date.now() - startTime,
           };
         }

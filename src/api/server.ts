@@ -16,6 +16,7 @@ import {
 } from '../services/redis.js';
 import { registerIntentRoutes } from './routes/intents.js';
 import { closeIntentQueue } from '../services/queue.js';
+import { createBotService } from '../services/bot.js';
 
 const app = fastify({
   logger: {
@@ -27,6 +28,7 @@ const app = fastify({
 });
 
 let isShuttingDown = false;
+let botService: Awaited<ReturnType<typeof createBotService>> | null = null;
 
 async function registerPlugins() {
   await app.register(helmet);
@@ -140,6 +142,11 @@ async function gracefulShutdown(signal: string) {
     await app.close();
     app.log.info('Fastify server closed');
 
+    if (botService) {
+      await botService.stop();
+      app.log.info('Telegram bot stopped');
+    }
+
     await closeIntentQueue();
     app.log.info('Intent queue closed');
 
@@ -202,6 +209,14 @@ const start = async () => {
     app.log.info('Registering API routes...');
     await registerApiRoutes();
     app.log.info('API routes registered');
+
+    if (config.TELEGRAM_BOT_TOKEN) {
+      app.log.info('Starting Telegram bot...');
+      botService = await createBotService(config.TELEGRAM_BOT_TOKEN);
+      app.log.info('Telegram bot started');
+    } else {
+      app.log.warn('TELEGRAM_BOT_TOKEN not set, bot will not start');
+    }
 
     await app.listen({ port: config.PORT, host: '0.0.0.0' });
     app.log.info({ port: config.PORT }, 'OneTripleC API listening');
