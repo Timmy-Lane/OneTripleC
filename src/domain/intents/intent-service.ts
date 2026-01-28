@@ -7,6 +7,9 @@ import {
   type IntentRow,
 } from '../../persistence/repositories/intent-repository.js';
 import { enqueueParseIntent, enqueueFetchQuotes } from '../../services/queue.js';
+import { quoteService } from '../routing/quote-service.js';
+import { createQuote, findQuoteById, markQuoteAccepted } from '../../persistence/repositories/quote-repository.js';
+import { createExecution } from '../../persistence/repositories/execution-repository.js';
 
 // Simple logger interface that works with both Fastify logger and console
 interface Logger {
@@ -258,6 +261,132 @@ export class IntentService {
       // Failure path: mark as FAILED
       return this.markFailed(intentId, 'Failed to parse intent from raw message');
     }
+  }
+
+  async fetchQuotesForIntent(intentId: string): Promise<{
+    quotesCreated: number;
+    state: IntentState;
+  }> {
+    logger.info({ intentId }, 'Fetching quotes for intent');
+
+    const intent = await findIntentById(intentId);
+    if (!intent) {
+      throw new Error(`Intent not found: ${intentId}`);
+    }
+
+    if (intent.state !== 'PARSED') {
+      throw new Error(`Intent must be in PARSED state to fetch quotes, current: ${intent.state}`);
+    }
+
+    if (!intent.sourceChainId || !intent.targetChainId || !intent.sourceToken || !intent.targetToken || !intent.sourceAmount) {
+      throw new Error('Intent missing required fields for quote fetching');
+    }
+
+    try {
+      const quoteResults = await quoteService.fetchQuotes({
+        sourceChainId: intent.sourceChainId,
+        targetChainId: intent.targetChainId,
+        sourceToken: intent.sourceToken,
+        targetToken: intent.targetToken,
+        sourceAmount: intent.sourceAmount,
+        slippageBps: 50,
+      });
+
+      logger.info({ intentId, quotesCount: quoteResults.length }, 'Quotes fetched successfully');
+
+      const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+      for (const quoteResult of quoteResults) {
+        await createQuote({
+          intentId,
+          route: quoteResult.route,
+          estimatedOutput: quoteResult.estimatedOutput,
+          totalFee: quoteResult.totalFee,
+          expiresAt,
+        });
+      }
+
+      await updateIntentWithValidation(
+        intentId,
+        intent.state as IntentState,
+        IntentState.QUOTED
+      );
+
+      logger.info({ intentId, quotesCreated: quoteResults.length }, 'Intent transitioned to QUOTED');
+
+      return {
+        quotesCreated: quoteResults.length,
+        state: IntentState.QUOTED,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({ intentId, error: errorMessage }, 'Failed to fetch quotes');
+
+      await this.markFailed(intentId, `Quote fetching failed: ${errorMessage}`);
+
+      return {
+        quotesCreated: 0,
+        state: IntentState.FAILED,
+      };
+    }
+  }
+
+  async acceptIntent(
+    intentId: string,
+    quoteId: string
+  ): Promise<{ intentId: string; state: IntentState; executionId: string }> {
+    logger.info({ intentId, quoteId }, 'Accepting intent');
+
+    const intent = await findIntentById(intentId);
+    if (!intent) {
+      throw new Error(`Intent not found: ${intentId}`);
+    }
+
+    if (intent.state !== 'QUOTED') {
+      throw new Error(
+        `Invalid state for acceptance: ${intent.state}. Intent must be in QUOTED state.`
+      );
+    }
+
+    const quote = await findQuoteById(quoteId);
+    if (!quote) {
+      throw new Error(`Quote not found: ${quoteId}`);
+    }
+
+    if (quote.intentId !== intentId) {
+      throw new Error(`Quote ${quoteId} does not belong to intent ${intentId}`);
+    }
+
+    const now = new Date();
+    if (new Date(quote.expiresAt) < now) {
+      throw new Error(`Quote ${quoteId} has expired`);
+    }
+
+    await markQuoteAccepted(quoteId);
+
+    await updateIntentWithValidation(
+      intentId,
+      intent.state as IntentState,
+      IntentState.ACCEPTED
+    );
+
+    const execution = await createExecution({
+      intentId,
+      quoteId,
+      userAddress: '0x0000000000000000000000000000000000000000',
+      chainId: intent.sourceChainId!,
+    });
+
+    logger.info(
+      { intentId, quoteId, executionId: execution.id },
+      'Intent accepted, execution created'
+    );
+
+    return {
+      intentId,
+      state: IntentState.ACCEPTED,
+      executionId: execution.id,
+    };
   }
 }
 
