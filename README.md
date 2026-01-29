@@ -1,122 +1,162 @@
 # OneTripleC
 
-> **Telegram-first cross-chain intent execution platform for EVM networks**
+> **Custodial wallet and cross-chain execution backend with channel-agnostic architecture**
 
-OneTripleC is a backend-first Web3 portfolio project demonstrating production-grade architecture for cross-chain intent execution. Users specify cross-chain swaps via Telegram, confirm once using Account Abstraction (ERC-4337), and the system automatically executes the full swap + bridge + swap flow.
+OneTripleC is a backend-first Web3 portfolio project demonstrating production-grade architecture for custodial wallet management and cross-chain intent execution. Users receive an automatic EOA wallet upon signup (via any interface: Telegram, Web, WebApp) and can execute cross-chain swaps without connecting a wallet.
 
-**⚠️ PORTFOLIO PROJECT DISCLAIMER**  
-This is a technical demonstration project, not a production DeFi protocol. Built to showcase backend architecture, Web3 orchestration, and engineering discipline for hiring purposes.
+**Portfolio Project Disclaimer**
+This is a technical demonstration project, not a production DeFi protocol. Built to showcase backend architecture, custodial wallet security, multi-interface design, and engineering discipline for hiring purposes.
 
-## 🎯 Core Concept
+## Core Concept
 
 ```
-User Intent: "Swap 1 ETH on Ethereum → USDC on Base"
+User signs up via Telegram/Web/WebApp
            ↓
-User confirms ONCE via Telegram WebApp (ERC-4337 UserOperation)
+Backend generates EOA wallet automatically
            ↓
-System executes: ETH → USDC (Ethereum) → Bridge → USDC (Base)
+User receives wallet address immediately (no MetaMask, no WalletConnect)
            ↓
-User receives USDC on Base + execution report
+User sends intent: "Swap 100 USDC to ETH"
+           ↓
+System fetches quotes → User confirms
+           ↓
+Backend signs and executes transaction with user's wallet
+           ↓
+User receives tx hash + execution report
 ```
 
 **Key Principles:**
-- **One confirmation per intent** (Account Abstraction)
-- **No custody, no private keys** (Smart account architecture)
-- **Backend-first** (API drives everything)
-- **Explainable routing** (Net output, fees, ETA)
-- **Reliability > speed** (State machines, retries, monitoring)
+- **Custodial simplicity**: Backend generates and securely stores private keys
+- **No wallet connection flow**: Users get wallet address immediately
+- **Channel-agnostic**: Same wallet accessible from Telegram, Web, or WebApp
+- **Backend-first**: API drives everything
+- **Explainable routing**: Net output, fees, ETA
+- **Reliability > speed**: State machines, retries, monitoring
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
-### Backend-First Design
+### Channel-Agnostic Design
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ Telegram Bot    │    │ Fastify API      │    │ BullMQ Workers  │
-│ + WebApp        │◄──►│ + Intent Engine  │◄──►│ + Execution     │
-│ (User Interface)│    │ (Orchestration)  │    │ (Async Tasks)   │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                        │                        │
-         │                        │                        │
-         ▼                        ▼                        ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ Smart Accounts  │    │ PostgreSQL       │    │ Redis           │
-│ (EVM chains)    │    │ (Source of Truth)│    │ (Queues + Cache)│
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ Telegram Bot     │    │ Web UI (future)  │    │ WebApp (future)  │
+│ (Interface)      │    │ (Interface)      │    │ (Interface)      │
+└────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
+         │                       │                       │
+         └───────────────────────┼───────────────────────┘
+                                 │
+                                 ▼
+                      ┌──────────────────┐
+                      │ AuthService      │
+                      │ (User Identity)  │
+                      └─────────┬────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+                    ▼                       ▼
+         ┌──────────────────┐    ┌──────────────────┐
+         │ WalletService    │    │ IntentService    │
+         │ (EOA Custody)    │    │ (Orchestration)  │
+         └──────────────────┘    └──────────────────┘
+                    │                       │
+                    └───────────┬───────────┘
+                                │
+                                ▼
+                      ┌──────────────────┐
+                      │ ExecutionService │
+                      │ (Signs & Submits)│
+                      └──────────────────┘
+                                │
+                                ▼
+                      ┌──────────────────┐
+                      │ Blockchain (EVM) │
+                      └──────────────────┘
 ```
 
-### Intent Execution Flow
-1. **Intent Creation**: User specifies cross-chain swap via Telegram
-2. **Route Calculation**: System finds optimal path (DEX → Bridge → DEX)
-3. **User Confirmation**: Single UserOperation signature via WebApp
-4. **Async Execution**: BullMQ workers execute transactions sequentially
-5. **Monitoring**: Real-time status updates + transaction tracking
-6. **Notification**: Results delivered via Telegram
+### Data Flow
+
+**User Signup (Any Interface):**
+1. User signs up via Telegram/Web/WebApp
+2. Backend creates user identity (channel-agnostic)
+3. Backend generates new EOA keypair (viem)
+4. Private key encrypted with AES-256-GCM
+5. Wallet stored in database
+6. User receives wallet address immediately
+
+**Intent Execution:**
+1. User sends intent: "swap 100 USDC to ETH"
+2. Backend parses intent, fetches quotes from DEXs
+3. User confirms quote
+4. Backend retrieves user's wallet, decrypts private key
+5. Backend signs transaction using wallet's private key
+6. Transaction submitted to blockchain
+7. Backend monitors confirmation
+8. User receives notification via their interface
 
 ### Supported v1 Scope
-- **Networks**: Ethereum, Base, Arbitrum
-- **Tokens**: Whitelisted ERC20 only
-- **DEX**: Uniswap v3
-- **Bridge**: Across Protocol
-- **Objective**: Maximize net output (price minus fees)
+- **Networks**: Ethereum, Base, Arbitrum (same-chain swaps only initially)
+- **Tokens**: Whitelisted ERC20 + native tokens
+- **DEX**: Uniswap V2, Uniswap V3
+- **Bridge**: Cross-chain support (future)
+- **Interfaces**: Telegram (current), Web/WebApp (future)
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 OneTripleC/
 ├── src/                           # Backend application core
+│   ├── interfaces/                # Channel-specific adapters
+│   │   ├── telegram/              # Telegram bot integration
+│   │   ├── web/                   # Web UI (future)
+│   │   └── webapp/                # Telegram WebApp (future)
 │   ├── api/                       # Fastify API layer
+│   │   ├── middleware/            # Auth, rate-limiting
+│   │   └── routes/                # auth, wallets, intents, quotes, executions
 │   ├── domain/                    # Core business logic
-│   │   ├── intents/              # Intent processing
-│   │   ├── execution/            # Cross-chain execution
-│   │   ├── routing/              # DEX/bridge routing
-│   │   └── state/                # Intent state machine
+│   │   ├── auth/                  # User authentication (channel-agnostic)
+│   │   ├── wallet/                # Wallet creation, key encryption
+│   │   ├── intents/               # Intent processing
+│   │   ├── execution/             # Transaction signing & submission
+│   │   └── routing/               # DEX/bridge routing
 │   ├── adapters/                  # External service integrations
-│   │   ├── blockchain/           # EVM chain adapters
-│   │   ├── dex/                  # DEX adapters (Uniswap v3)
-│   │   ├── bridge/               # Bridge adapters (Across)
-│   │   └── telegram/             # Telegram bot/WebApp
+│   │   ├── blockchain/            # Viem clients, RPC access
+│   │   ├── dex/                   # Uniswap V2/V3 adapters
+│   │   ├── bridge/                # Bridge adapters (future)
+│   │   └── telegram/              # Telegram Bot API client
 │   ├── workers/                   # BullMQ background workers
-│   ├── persistence/               # Database and Redis
+│   ├── persistence/               # Database (PostgreSQL + Drizzle ORM)
+│   │   ├── models/                # Database schema
+│   │   └── repositories/          # users, credentials, wallets, intents, quotes, executions
 │   └── shared/                    # Shared utilities & types
-├── contracts/                     # Smart contracts (minimal)
-│   ├── src/                      # Account Abstraction contracts
-│   ├── test/                     # Contract tests
-│   └── script/                   # Deployment scripts
-├── infrastructure/                # Docker & deployment
-├── docs/                         # Technical documentation
-└── tests/                        # End-to-end tests
+├── docs/                          # Technical documentation
+│   └── ARCHITECTURE.md            # Comprehensive architecture design
+├── CLAUDE.md                      # Development instructions for Claude Code
+└── README.md                      # This file
 ```
 
-## 🚀 Tech Stack
+## Tech Stack
 
 **Backend Infrastructure:**
-- **Runtime**: Bun + Node.js + TypeScript
+- **Runtime**: Bun (not Node.js)
 - **API**: Fastify (performance + plugins)
-- **Database**: PostgreSQL (audit log + source of truth)
+- **Database**: PostgreSQL + Drizzle ORM
 - **Queue**: Redis + BullMQ (async execution)
 - **Blockchain**: Viem (EVM interactions)
-
-**Smart Contracts:**
-- **Account Abstraction**: ERC-4337 compatible smart accounts
-- **Execution**: Minimal allowlisted executor contracts
-- **Framework**: Foundry (Solidity dev environment)
+- **Encryption**: Node.js crypto (AES-256-GCM)
 
 **Architecture Patterns:**
+- Channel-agnostic user identity
+- Custodial wallet management
 - Intent-based state machines
 - Asynchronous worker execution
 - Repository pattern + domain-driven design
-- Comprehensive error handling + retries
 
-## ⚙️ Local Development
+## Local Development
 
 ### Prerequisites
 
 **Required:**
 - [Bun](https://bun.sh/) v1.0.0 or later
-- [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/install/) (for local infrastructure)
-
-**Optional:**
-- [Foundry](https://getfoundry.sh/) (for smart contract development)
+- [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/install/)
 
 ### Quick Start
 
@@ -131,30 +171,32 @@ bun install
 **2. Start local infrastructure (PostgreSQL + Redis):**
 
 ```bash
-# Start PostgreSQL and Redis in Docker
 docker compose up -d
-
-# Verify containers are running
-docker compose ps
+docker compose ps  # Verify containers are running
 ```
 
 **3. Configure environment:**
 
 ```bash
-# Copy environment template
 cp .env.example .env
 
 # Edit .env and set:
 # - DATABASE_URL (default works with Docker Compose)
 # - REDIS_URL (default works with Docker Compose)
-# - RPC URLs for Ethereum, Base, Arbitrum (use public RPCs or your own)
-# - EXECUTOR_PRIVATE_KEY (create a dedicated test wallet)
+# - WALLET_ENCRYPTION_KEY (generate 32-byte hex string)
+# - RPC URLs for Ethereum, Base, Arbitrum
+# - TELEGRAM_BOT_TOKEN (optional, for Telegram bot)
+```
+
+**Generate encryption key:**
+```bash
+# Generate a secure 32-byte key for wallet encryption
+openssl rand -hex 32
 ```
 
 **4. Initialize database:**
 
 ```bash
-# Generate and run migrations
 bun run db:generate
 bun run db:migrate
 
@@ -170,29 +212,12 @@ bun run dev
 
 # Terminal 2: Start background workers
 bun run worker:start
+
+# Terminal 3: Start Telegram bot (optional)
+bun run bot:start
 ```
 
 The API will be available at `http://localhost:3000`. Health check: `http://localhost:3000/health`
-
-### Infrastructure Details
-
-**Docker Compose services:**
-
-- **PostgreSQL**: Port `5432`, database `onetriplec`
-- **Redis**: Port `6379`, persistence enabled
-
-**Stopping infrastructure:**
-
-```bash
-# Stop containers (keeps data)
-docker compose stop
-
-# Stop and remove containers (keeps volumes)
-docker compose down
-
-# Stop and remove everything including data
-docker compose down -v
-```
 
 ### Development Commands
 
@@ -200,6 +225,7 @@ docker compose down -v
 # API & Workers
 bun run dev              # Start API server with hot reload
 bun run worker:start     # Start background workers
+bun run bot:start        # Start Telegram bot
 bun run start            # Production mode (no hot reload)
 
 # Database
@@ -214,100 +240,211 @@ bun run lint:fix         # ESLint with auto-fix
 bun run format           # Prettier formatting
 bun run format:check     # Check formatting
 bun test                 # Run tests
-
-# Smart Contracts (optional)
-bun run contracts:build  # Compile Solidity contracts
-bun run contracts:test   # Run Foundry tests
 ```
 
-### Troubleshooting
+### Infrastructure Details
 
-**Database connection failed:**
+**Docker Compose services:**
+
+- **PostgreSQL**: Port `5432`, database `onetriplec`
+- **Redis**: Port `6379`, persistence enabled
+
+**Stopping infrastructure:**
 
 ```bash
-# Check PostgreSQL is running
-docker compose ps
-
-# Check PostgreSQL logs
-docker compose logs postgres
-
-# Restart PostgreSQL
-docker compose restart postgres
+docker compose stop         # Stop containers (keeps data)
+docker compose down         # Stop and remove containers (keeps volumes)
+docker compose down -v      # Stop and remove everything including data
 ```
 
-**Redis connection failed:**
+## Database Schema
 
-```bash
-# Check Redis is running
-docker compose ps
+### Core Tables
 
-# Check Redis logs
-docker compose logs redis
+```typescript
+// users: channel-agnostic identity
+users:
+  - id (UUID, PK)
+  - created_at
+  - updated_at
 
-# Test Redis connection
-docker compose exec redis redis-cli ping
+// user_credentials: authentication methods (Telegram, email, OAuth)
+user_credentials:
+  - id (UUID, PK)
+  - user_id (FK → users.id)
+  - provider (enum: 'telegram' | 'email' | 'google' | 'apple')
+  - provider_user_id (text)
+  - metadata (jsonb)
+  - UNIQUE(provider, provider_user_id)
+
+// wallets: one EOA per user
+wallets:
+  - id (UUID, PK)
+  - user_id (FK → users.id, UNIQUE)
+  - address (text, UNIQUE)
+  - encrypted_private_key (text)
+  - encryption_key_id (text)
+
+// intents: user intent lifecycle
+intents:
+  - id (UUID, PK)
+  - user_id (FK → users.id)
+  - raw_message (text)
+  - state (enum: CREATED, PARSING, PARSED, QUOTED, ACCEPTED, EXECUTING, COMPLETED, FAILED)
+  - source_chain_id, target_chain_id, source_token, target_token, source_amount
+  - error_message
+
+// quotes: route options for intents
+quotes:
+  - id (UUID, PK)
+  - intent_id (FK → intents.id)
+  - route (jsonb: steps, fees, provider)
+  - estimated_output, total_fee
+  - expires_at
+
+// executions: transaction execution tracking
+executions:
+  - id (UUID, PK)
+  - intent_id (FK → intents.id)
+  - quote_id (FK → quotes.id)
+  - user_address (wallet address)
+  - tx_hash (transaction hash on blockchain)
+  - state (enum: PENDING, EXECUTING, COMPLETED, FAILED)
 ```
 
-**Port already in use:**
+## Security Model
 
-```bash
-# Change PORT in .env (default 3000)
-# Or find and kill the process using the port:
-lsof -ti:3000 | xargs kill -9
-```
+### Custodial Trade-offs
 
-## 📋 What This Project Demonstrates
+**Accepted:**
+- Backend generates and stores private keys
+- Single point of failure (backend compromise = all keys exposed)
+- Regulatory implications (custodial = MSB in some jurisdictions)
+
+**UX Benefits:**
+- No wallet connection required
+- Instant onboarding (wallet address in <1 second)
+- Multi-device access (same wallet from any interface)
+- No seed phrase management for users
+
+### Security Measures
+
+**Encryption:**
+- AES-256-GCM for all private keys at rest
+- Master key stored in KMS (production) or env vars (dev)
+- Unique IV and auth tag per encrypted key
+
+**Access Controls:**
+- Rate limiting per user and operation type
+- Audit logging for all key decryption and transaction signing
+- Private keys never logged or exposed in responses
+
+**Production Hardening (Future):**
+- HSM integration for key storage
+- Multi-sig for high-value operations
+- Spending limits per user (daily/per-transaction)
+- Transaction approval flow for large amounts
+- Cold wallet for most funds, hot wallet for small amounts
+
+### Threat Model
+
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| Backend compromise | All keys exposed | Encryption at rest, KMS, rate limiting |
+| Database breach | Encrypted keys stolen | Master key stored separately, strong encryption |
+| Insider threat | Developer access | Access controls, audit logs, least privilege |
+| Phishing | User tricked | Transaction approval UI, spending limits |
+| Regulatory | Custodial = MSB | Compliance framework, KYC (future) |
+
+## What This Project Demonstrates
 
 ### Backend Engineering
-- Production-grade API architecture
-- Asynchronous job processing at scale
+- Production-grade API architecture (Fastify)
+- Custodial wallet management with encryption
+- Channel-agnostic user identity model
+- Asynchronous job processing at scale (BullMQ)
 - Database design for financial applications
 - Error handling + retry strategies
-- Comprehensive logging + monitoring
 
 ### Web3 Orchestration
 - Multi-chain transaction coordination
-- Account Abstraction (ERC-4337) integration
-- DEX + bridge routing optimization
+- DEX adapter pattern (Uniswap V2/V3)
+- Quote aggregation and routing
+- Transaction signing with viem
 - Real-time blockchain monitoring
 
 ### System Design
+- Clean separation of concerns (interfaces ↔ domain ↔ persistence)
 - Intent-based user experience
 - State machine execution models
-- Microservice communication patterns
-- Scalable worker architecture
+- Extensible interface layer (Telegram → Web → WebApp)
 
-## 🚫 Explicit Non-Goals
+## Explicit Non-Goals
 
 **This project intentionally excludes:**
+- Non-custodial wallet architecture
+- Account Abstraction (ERC-4337)
 - Production DeFi protocol features
 - Advanced trading strategies
-- Token custody or wallet management
-- User onboarding or KYC
+- User onboarding or KYC (v1)
 - React dashboard/frontend (v1)
 - Gasless transactions or paymasters
 - Multi-sig or governance systems
 
-## 🔒 Security Considerations
+## Adding New Interfaces
 
-- **No private key custody** (users control smart accounts)
-- **Allowlisted execution** (contracts restrict function calls)
-- **Audit trails** (all actions logged in PostgreSQL)
-- **Input validation** (Zod schemas throughout)
-- **Rate limiting** (API protection)
+### Example: Adding Web UI
 
-## 📈 Future Extensions
+**Step 1:** Implement authentication
+```typescript
+// src/interfaces/web/auth-routes.ts
+app.post('/auth/email/register', async (req, reply) => {
+  const { email, password } = req.body;
+
+  // Use existing AuthService (no core changes needed)
+  const user = await authService.getOrCreateUser({
+    provider: 'email',
+    providerId: email,
+    metadata: { email }
+  });
+
+  // WalletService already created wallet
+  const wallet = await walletService.getWalletByUserId(user.id);
+
+  return { token: generateJWT(user.id), walletAddress: wallet.address };
+});
+```
+
+**Step 2:** Use existing APIs
+```typescript
+// Web UI calls same API routes as Telegram
+fetch('/intents', {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${token}` },
+  body: JSON.stringify({ rawMessage: 'swap 100 USDC to ETH' })
+});
+```
+
+**No changes to core domain logic required.**
+
+## Future Extensions
 
 **Potential v2 features (not implemented):**
-- Additional chains (Polygon, Optimism)
-- More DEX protocols (1inch, Paraswap)
+- Web UI (email/password, OAuth)
+- Telegram WebApp (in-app wallet access)
+- Cross-chain bridge integration (Across, Stargate)
+- Additional DEX protocols (1inch, Paraswap)
 - Advanced routing algorithms
 - Real-time price feeds
-- React admin dashboard
-- Institutional features
+- Spending limits and approval flows
+- Multi-sig for high-value operations
+- Cold wallet integration
 
 ---
 
-**Author**: Portfolio demonstration project  
-**Purpose**: Technical architecture showcase  
+**Author**: Portfolio demonstration project
+**Purpose**: Technical architecture showcase
 **Status**: Active development
+
+For detailed architecture documentation, see [ARCHITECTURE.md](./ARCHITECTURE.md)
+For development instructions, see [CLAUDE.md](./CLAUDE.md)

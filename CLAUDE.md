@@ -1,5 +1,5 @@
 ---
-description: Backend architecture for OneTripleC, a Telegram-first cross-chain intent execution platform
+description: Backend architecture for OneTripleC, a custodial wallet and cross-chain execution platform with channel-agnostic design
 globs: '*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json'
 alwaysApply: true
 ---
@@ -8,11 +8,12 @@ alwaysApply: true
 
 ## System Overview
 
-OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution platform.
+OneTripleC is a **custodial wallet and execution backend** with channel-agnostic architecture.
 
-- Primary interface: Telegram bot
-- Minimal frontend: WebApp for confirmations only
-- Core product: Backend orchestration of cross-chain transactions
+- Core product: Automatic EOA wallet creation + cross-chain transaction execution
+- Multi-interface: Telegram, Web UI, WebApp (all clients, not the architecture)
+- Custodial model: Backend generates and securely stores private keys
+- No wallet connection required: Users get wallet address immediately on signup
 
 ## Technology Stack
 
@@ -42,39 +43,57 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 
 ## Architectural Layers
 
-### 1. API Layer (`src/api/`)
+### 1. Interfaces Layer (`src/interfaces/`)
+
+**Responsibility**: Channel-specific adapters (Telegram, Web, WebApp)
+
+- Each interface authenticates users via its own method
+- All interfaces use `AuthService` to get/create users
+- Returns user.id to API layer via JWT or session
+- **Interface implementations are independent and pluggable**
+
+**Key files**:
+
+- `telegram/bot.ts`: Telegram bot handlers
+- `telegram/auth.ts`: Telegram-specific authentication
+- `web/auth-routes.ts`: Email/password, OAuth (future)
+- `webapp/auth.ts`: Telegram WebApp authentication (future)
+
+### 2. API Layer (`src/api/`)
 
 **Responsibility**: HTTP transport and orchestration
 
 - Thin controllers that validate input and delegate to domain services
-- Expose REST endpoints for Telegram bot and WebApp
+- Expose REST endpoints for all interfaces
+- Extract user from JWT/session via middleware
 - Return HTTP errors, never throw unhandled exceptions
 - **Does NOT contain business logic**
 
 **Key files**:
 
 - `server.ts`: Fastify setup, plugin registration, health checks
-- `routes/`: One file per domain (intents, quotes, executions, users)
-- `middleware/`: Auth, rate-limiting, error handling
+- `routes/`: One file per domain (auth, wallets, intents, quotes, executions)
+- `middleware/`: Auth extraction, rate-limiting, error handling
 - `schemas/`: Zod schemas for request/response validation
 
-### 2. Domain Layer (`src/domain/`)
+### 3. Domain Layer (`src/domain/`)
 
 **Responsibility**: Pure business logic (framework-agnostic)
 
-- Orchestrates workflows (parse intent → fetch quotes → build execution)
+- Orchestrates workflows (auth → wallet → intent → quote → execution)
 - Stateless services, no direct DB or API knowledge
 - Depends ONLY on repositories and adapters (via interfaces)
-- **Does NOT know about HTTP or Workers**
+- **Does NOT know about HTTP, Workers, or Interfaces**
 
 **Key files**:
 
+- `auth/auth-service.ts`: Channel-agnostic user lookup/creation
+- `wallet/wallet-service.ts`: Wallet creation, key encryption/decryption
 - `intents/intent-service.ts`: Intent lifecycle orchestration
 - `routing/quote-service.ts`: Quote fetching and ranking
-- `execution/execution-service.ts`: Transaction building and submission
-- `state/state-machine.ts`: Intent state transitions
+- `execution/execution-service.ts`: Transaction building and signing with wallet keys
 
-### 3. Persistence Layer (`src/persistence/`)
+### 4. Persistence Layer (`src/persistence/`)
 
 **Responsibility**: Database access (PostgreSQL)
 
@@ -87,8 +106,12 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 - `db.ts`: Drizzle client setup
 - `models/schema.ts`: Database schema (tables, enums, indexes)
 - `repositories/`: CRUD operations per entity
+  - `user-repository.ts`: User CRUD (channel-agnostic)
+  - `credential-repository.ts`: User authentication credentials (Telegram, email, OAuth)
+  - `wallet-repository.ts`: Wallet CRUD and encrypted key storage
+  - `intent-repository.ts`, `quote-repository.ts`, `execution-repository.ts`: Unchanged
 
-### 4. Workers Layer (`src/workers/`)
+### 5. Workers Layer (`src/workers/`)
 
 **Responsibility**: Background job processing (BullMQ)
 
@@ -99,12 +122,12 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 
 **Key files**:
 
-- `index.ts`: Worker initialization
-- `execution/`: Intent parsing, quote fetching, execution
-- `monitoring/`: Transaction monitoring, quote expiry
-- `notifications/`: Telegram notifications
+- `index.ts`: Worker initialization (parse-intent, fetch-quotes)
+- `execution-worker.ts`: Execute intent (sign & submit transactions)
+- `monitoring-worker.ts`: Monitor transaction confirmations
+- `notification-worker.ts`: Send Telegram/email notifications
 
-### 5. Adapters Layer (`src/adapters/`)
+### 6. Adapters Layer (`src/adapters/`)
 
 **Responsibility**: External service clients
 
@@ -119,34 +142,162 @@ OneTripleC is a **backend-heavy, Telegram-first** cross-chain intent execution p
 - `bridge/`: Across, Stargate adapters
 - `telegram/`: Telegram Bot API client
 
+## User Identity Model (Channel-Agnostic)
+
+### Core Principle
+User identity is independent of any interface. Users can authenticate via Telegram, email, OAuth, or future methods.
+
+### Database Schema
+
+```typescript
+// users: core identity (channel-agnostic)
+users:
+  - id (UUID, PK)
+  - created_at
+  - updated_at
+
+// user_credentials: authentication methods (1:many with users)
+user_credentials:
+  - id (UUID, PK)
+  - user_id (UUID, FK → users.id)
+  - provider (enum: 'telegram' | 'email' | 'google' | 'apple')
+  - provider_user_id (text: telegram_id, email, oauth_sub)
+  - metadata (jsonb: provider-specific data)
+  - created_at
+  - UNIQUE(provider, provider_user_id)
+
+// wallets: one EOA per user
+wallets:
+  - id (UUID, PK)
+  - user_id (UUID, FK → users.id, UNIQUE)
+  - address (text, UNIQUE)
+  - encrypted_private_key (text)
+  - encryption_key_id (text)
+  - created_at
+```
+
+### AuthService Pattern
+
+```typescript
+// All interfaces use this single entry point
+const user = await authService.getOrCreateUser({
+  provider: 'telegram',
+  providerId: ctx.from.id.toString(),
+  metadata: { username: ctx.from.username }
+});
+
+// Returns user.id for use in API requests
+// WalletService automatically created wallet during user creation
+```
+
+## Wallet Management (Custodial Model)
+
+### Automatic Wallet Creation
+- One EOA wallet per user
+- Generated automatically on user signup
+- Private key encrypted with AES-256-GCM
+- Wallet address returned immediately
+
+### Key Generation Flow
+
+```typescript
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+
+// 1. Generate keypair
+const privateKey = generatePrivateKey();
+const account = privateKeyToAccount(privateKey);
+
+// 2. Encrypt private key
+const { encryptedData, iv, authTag } = encryptPrivateKey(
+  privateKey,
+  MASTER_KEY
+);
+
+// 3. Store wallet
+await createWallet({
+  userId: user.id,
+  address: account.address,
+  encrypted_private_key: JSON.stringify({ encryptedData, iv, authTag })
+});
+```
+
+### Security Model
+- **Encryption at rest**: AES-256-GCM with backend master key
+- **Key storage**: Master key in env vars (dev) or KMS (production)
+- **Rate limiting**: Per user, per operation
+- **Audit logging**: All key access logged
+- **Never logged**: Private keys never appear in logs or responses
+
+### Transaction Signing
+
+```typescript
+// ExecutionService uses wallet's private key to sign transactions
+const wallet = await walletService.getWalletByUserId(userId);
+const privateKey = await walletService.getPrivateKey(wallet.id);
+
+const account = privateKeyToAccount(privateKey);
+const client = createWalletClient({ account, chain, transport });
+
+const hash = await client.sendTransaction(tx);
+```
+
 ## Data Flow
 
-### Telegram → Create Intent
+### User Signup (Any Interface)
 
-1. Bot sends `POST /intents` with raw message
-2. API validates, persists intent (state: `CREATED`), enqueues `parse-intent` job
-3. Worker dequeues, calls `IntentService.parseIntent()`, updates state to `PARSED`
-4. Worker enqueues `fetch-quotes` job
-5. Worker fetches quotes, persists to DB, updates state to `QUOTED`
-6. Bot polls `GET /intents/:id`, shows quotes to user
+1. User signs up via Telegram/Web/WebApp
+2. Interface calls `AuthService.getOrCreateUser({ provider, providerId, metadata })`
+3. AuthService creates user in `users` table
+4. AuthService creates credential in `user_credentials` table
+5. WalletService generates new EOA keypair (viem)
+6. WalletService encrypts private key with master key
+7. WalletService creates wallet in `wallets` table
+8. User receives wallet address immediately
+
+### Interface → Create Intent
+
+1. User sends message via any interface (Telegram, Web, etc.)
+2. Interface authenticates user, gets `user.id`
+3. Interface sends `POST /intents` with JWT/session (contains `user.id`) and raw message
+4. API extracts `user.id` from auth middleware
+5. API validates, persists intent (state: `CREATED`), enqueues `parse-intent` job
+6. Worker dequeues, calls `IntentService.parseIntent()`, updates state to `PARSED`
+7. Worker enqueues `fetch-quotes` job
+8. Worker fetches quotes, persists to DB, updates state to `QUOTED`
+9. Interface polls `GET /intents/:id`, shows quotes to user
 
 ### Confirm Intent → Execute
 
-1. User confirms via Telegram
-2. Bot sends `POST /intents/:id/confirm`
+1. User confirms via any interface
+2. Interface sends `POST /intents/:id/accept` with quoteId
 3. API validates quote, updates state to `ACCEPTED`, enqueues `execute-intent` job
-4. Worker dequeues, calls `ExecutionService.execute()`, builds txs
-5. Worker submits tx, enqueues `monitor-tx` job
-6. Monitoring worker polls RPC, updates tx state on confirmation
-7. Notification worker sends Telegram message
+4. Worker dequeues, calls `ExecutionService.execute()`
+5. ExecutionService gets user's wallet, decrypts private key
+6. ExecutionService builds and signs transactions using wallet's private key
+7. ExecutionService submits tx, stores `tx_hash`, enqueues `monitor-tx` job
+8. Monitoring worker polls RPC, updates execution state on confirmation
+9. Notification worker sends message to user via their interface
 
 ## Folder Structure
 
 ```
 src/
+├── interfaces/           # Channel-specific adapters (Telegram, Web, WebApp)
+│   ├── telegram/         # Telegram bot integration
+│   ├── web/              # Web UI auth (future)
+│   └── webapp/           # Telegram WebApp (future)
 ├── api/                  # HTTP transport (Fastify routes)
+│   ├── middleware/       # Auth, rate-limiting, error handling
+│   └── routes/           # auth, wallets, intents, quotes, executions
 ├── domain/               # Business logic (services, state machines)
+│   ├── auth/             # User authentication (channel-agnostic)
+│   ├── wallet/           # Wallet creation, key management
+│   ├── intents/          # Intent lifecycle orchestration
+│   ├── routing/          # Quote fetching and ranking
+│   └── execution/        # Transaction building and signing
 ├── persistence/          # Database access (repositories, Drizzle)
+│   ├── models/           # Database schema
+│   └── repositories/     # users, credentials, wallets, intents, quotes, executions
 ├── workers/              # Background jobs (BullMQ workers)
 ├── adapters/             # External clients (blockchain, DEX, bridge, Telegram)
 ├── services/             # Infrastructure (Redis, queue setup)
@@ -177,7 +328,9 @@ OneTripleC's database follows these principles:
 
 | Table | Purpose | Status |
 |-------|---------|--------|
-| users | Telegram identity | REQUIRED |
+| users | Channel-agnostic user identity | REQUIRED |
+| user_credentials | Authentication methods (Telegram, email, OAuth) | REQUIRED |
+| wallets | EOA wallets (one per user) | REQUIRED |
 | intents | Intent lifecycle | REQUIRED |
 | quotes | Route options | REQUIRED |
 | executions | Execution tracking | REQUIRED |
@@ -194,11 +347,10 @@ OneTripleC's database follows these principles:
 | execution_logs | Logs don't belong in DB | Structured logs (Pino) |
 | fee_breakdowns | Redundant accounting | Compute from `quotes.route.fees` |
 | balances | Cached RPC data | Query RPC on demand |
-| sessions | Ephemeral state | Use Redis |
+| sessions | Ephemeral state | Use Redis or JWT |
 | routes | Premature optimization | Fetch quotes on demand |
 | dexes | Protocol config | Hardcode in adapters |
 | bridges | Protocol config | Hardcode in adapters |
-| wallets | No persistent wallet mgmt | Prompt user per execution |
 
 ### Rule: Justify New Tables
 
@@ -343,9 +495,14 @@ bun run db:studio     # Open Drizzle Studio
 
 ### Security
 
-- Rate limiting per Telegram user
-- Telegram auth validation (webhook signature)
-- Private key management (env vars, secrets manager)
+- **Custodial Model Risks**: Backend holds all private keys (single point of failure)
+- **Encryption at rest**: AES-256-GCM for all private keys
+- **Key management**: Master key in KMS (production) or env vars (dev)
+- **Rate limiting**: Per user, per operation type
+- **Audit logging**: All key decryption and transaction signing logged
+- **Never logged**: Private keys never appear in logs, responses, or errors
+- **Spending limits**: Configurable daily/transaction limits per user (future)
+- **Interface auth**: Telegram webhook signature validation, JWT for Web/WebApp
 
 ## Decision Log
 
