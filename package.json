@@ -18,7 +18,12 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "worker:start": "bun src/workers/index.ts",
+    "db:reset": "bun scripts/reset-db.ts",
+    "worker": "bun src/workers/index.ts",
+    "worker:dev": "bun --watch src/workers/index.ts",
+    "services": "concurrently -n api,worker -c blue,green \"bun run dev\" \"bun run worker:dev\"",
+    "services:start": "concurrently -n api,worker -c blue,green \"bun start\" \"bun run worker\"",
+    "setup": "bun install && bun run db:migrate && bun scripts/generate-wallets-for-existing-users.ts",
     "contracts:build": "forge build",
     "contracts:test": "forge test"
   },
@@ -29,6 +34,7 @@
     "@types/pg": "^8.16.0",
     "@typescript-eslint/eslint-plugin": "^8.53.0",
     "@typescript-eslint/parser": "^8.53.0",
+    "concurrently": "^9.2.1",
     "eslint": "^9.39.2",
     "prettier": "^3.8.0",
     "typescript": "^5.9.3"
