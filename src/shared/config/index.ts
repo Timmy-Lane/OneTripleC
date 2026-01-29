@@ -22,7 +22,12 @@ const envSchema = z.object({
   
   // Private Keys (for execution)
   EXECUTOR_PRIVATE_KEY: z.string(),
-  
+
+  // Wallet Encryption
+  WALLET_MASTER_KEY: z
+    .string()
+    .length(64, 'WALLET_MASTER_KEY must be 64 hex characters (32 bytes)'),
+
   // External APIs
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   

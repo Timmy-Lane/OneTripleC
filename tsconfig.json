@@ -16,13 +16,12 @@
     "declarationMap": false,
     "sourceMap": true,
     "outDir": "./dist",
-    "rootDir": "./src",
     "paths": {
       "@/*": ["./src/*"]
     },
     "types": ["bun-types", "node"]
   },
-  "include": ["src/**/*", "tests/**/*", "*.ts"],
+  "include": ["src/**/*", "tests/**/*", "scripts/**/*", "drizzle.config.ts"],
   "exclude": [
     "node_modules",
     "dist",

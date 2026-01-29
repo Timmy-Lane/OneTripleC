@@ -32,3 +32,5 @@ temp/
 .cache/
 *.tmp
 *.bak
+# Drizzle
+src/persistence/migrations/meta/
