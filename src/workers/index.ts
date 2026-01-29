@@ -7,12 +7,55 @@ import {
   JOB_TYPES,
   type ParseIntentJobData,
   type FetchQuotesJobData,
+  type ExecuteIntentJobData,
+  type MonitorTxJobData,
   closeIntentQueue,
+  enqueueMonitorTx,
 } from '../services/queue.js';
 import { intentService } from '../domain/intents/intent-service.js';
+import { createWalletService } from '../domain/wallet/wallet-service.js';
+import { createExecutionService } from '../domain/execution/execution-service.js';
+import { updateExecutionState } from '../persistence/repositories/execution-repository.js';
+import { ExecutionState } from '../shared/types/index.js';
+import { createPublicClient, http } from 'viem';
+import { mainnet, base, arbitrum, optimism, polygon } from 'viem/chains';
 import type { Job } from 'bullmq';
 
-type IntentJobData = ParseIntentJobData | FetchQuotesJobData;
+type IntentJobData =
+  | ParseIntentJobData
+  | FetchQuotesJobData
+  | ExecuteIntentJobData
+  | MonitorTxJobData;
+
+// Initialize services
+const walletService = createWalletService();
+const executionService = createExecutionService(walletService);
+
+// Chain configs
+const VIEM_CHAINS: Record<number, any> = {
+  1: mainnet,
+  8453: base,
+  42161: arbitrum,
+  10: optimism,
+  137: polygon,
+};
+
+function getRpcUrl(chainId: number): string {
+  switch (chainId) {
+    case 1:
+      return process.env.ETHEREUM_RPC_URL!;
+    case 8453:
+      return process.env.BASE_RPC_URL!;
+    case 42161:
+      return process.env.ARBITRUM_RPC_URL!;
+    case 10:
+      return process.env.OPTIMISM_RPC_URL || 'https://mainnet.optimism.io';
+    case 137:
+      return process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com';
+    default:
+      throw new Error(`RPC URL not configured for chain: ${chainId}`);
+  }
+}
 
 // Intent queue worker - processes parse-intent and fetch-quotes jobs
 const intentWorker = new Worker<IntentJobData>(
@@ -58,6 +101,72 @@ const intentWorker = new Worker<IntentJobData>(
           };
         }
 
+        case JOB_TYPES.EXECUTE_INTENT: {
+          const { executionId } = job.data as ExecuteIntentJobData;
+          console.log(`[Worker] Processing execute-intent for: ${executionId}`);
+
+          const result = await executionService.executeIntent(executionId);
+
+          // Enqueue monitoring job
+          if (result.txHash) {
+            await enqueueMonitorTx(executionId, result.txHash, result.chainId);
+          }
+
+          console.log(
+            `[Worker] execute-intent completed for ${executionId}: txHash=${result.txHash}`
+          );
+          return {
+            success: true,
+            executionId,
+            txHash: result.txHash,
+            chainId: result.chainId,
+            duration: Date.now() - startTime,
+          };
+        }
+
+        case JOB_TYPES.MONITOR_TX: {
+          const { executionId, txHash, chainId } = job.data as MonitorTxJobData;
+          console.log(
+            `[Worker] Monitoring transaction: ${txHash} on chain ${chainId}`
+          );
+
+          // Get RPC client
+          const chain = VIEM_CHAINS[chainId];
+          if (!chain) {
+            throw new Error(`Unsupported chain: ${chainId}`);
+          }
+
+          const rpcUrl = getRpcUrl(chainId);
+          const client = createPublicClient({
+            chain,
+            transport: http(rpcUrl),
+          });
+
+          // Check transaction receipt
+          const receipt = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
+
+          if (receipt.status === 'success') {
+            await updateExecutionState(executionId, ExecutionState.CONFIRMED, {
+              confirmedAt: new Date(),
+            });
+
+            console.log(
+              `[Worker] Transaction confirmed: ${txHash} at block ${receipt.blockNumber}`
+            );
+            return {
+              success: true,
+              status: 'confirmed',
+              blockNumber: receipt.blockNumber.toString(),
+              duration: Date.now() - startTime,
+            };
+          } else {
+            await updateExecutionState(executionId, ExecutionState.FAILED, {
+              errorMessage: 'Transaction reverted',
+            });
+            throw new Error(`Transaction reverted: ${txHash}`);
+          }
+        }
+
         default:
           console.warn(`[Worker] Unknown job type: ${job.name}`);
           return { success: false, error: `Unknown job type: ${job.name}` };
@@ -98,35 +207,7 @@ intentWorker.on('error', (error) => {
   console.error('[Worker] Worker error:', error);
 });
 
-// Legacy workers for backwards compatibility
-// These can be removed once all jobs migrate to intent-queue
-
-type ExecuteIntentJob = {
-  intentId: string;
-  route: unknown;
-};
-
-// intent execution worker (legacy)
-const executionWorker = new Worker(
-  'intent-execution',
-  async (job: Job<ExecuteIntentJob>) => {
-    const { intentId } = job.data;
-    console.log(`[Legacy Worker] Processing intent execution: ${intentId}`);
-    return { success: true, intentId };
-  },
-  { connection: getRedisConnection(), concurrency: 5 }
-);
-
-// tx monitoring worker (legacy)
-const monitoringWorker = new Worker(
-  'transaction-monitoring',
-  async job => {
-    const { txHash, chain } = job.data;
-    console.log(`[Legacy Worker] Monitoring transaction: ${txHash} on ${chain}`);
-    return { success: true, txHash };
-  },
-  { connection: getRedisConnection(), concurrency: 5 }
-);
+// Legacy workers removed - all jobs now use intent-queue
 
 async function startWorkers() {
   try {
@@ -140,7 +221,9 @@ async function startWorkers() {
 
     console.log('[Startup] OneTripleC workers started');
     console.log(`[Startup] Intent queue worker listening on: ${INTENT_QUEUE_NAME}`);
-    console.log('[Startup] Job types: parse-intent, fetch-quotes');
+    console.log(
+      '[Startup] Job types: parse-intent, fetch-quotes, execute-intent, monitor-tx'
+    );
   } catch (err) {
     console.error('[Startup] Failed to start workers:', err);
     process.exit(1);
@@ -153,10 +236,6 @@ async function gracefulShutdown(signal: string) {
   try {
     await intentWorker.close();
     console.log('[Shutdown] Intent worker closed');
-
-    await executionWorker.close();
-    await monitoringWorker.close();
-    console.log('[Shutdown] Legacy workers closed');
 
     await closeIntentQueue();
     console.log('[Shutdown] Intent queue closed');
