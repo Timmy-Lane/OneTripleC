@@ -41,6 +41,8 @@ export const users = pgTable(
     telegramId: bigint('telegram_id', { mode: 'number' }).notNull().unique(),
     telegramUsername: varchar('telegram_username', { length: 255 }),
     telegramFirstName: varchar('telegram_first_name', { length: 255 }),
+    authProvider: varchar('auth_provider', { length: 50 }).notNull().default('telegram'),
+    authProviderId: text('auth_provider_id').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -50,6 +52,33 @@ export const users = pgTable(
   },
   table => ({
     telegramIdIdx: index('idx_users_telegram_id').on(table.telegramId),
+    authProviderIdx: index('idx_users_auth_provider').on(table.authProvider, table.authProviderId),
+  })
+);
+
+export const wallets = pgTable(
+  'wallets',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .unique()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    address: varchar('address', { length: 255 }).notNull().unique(),
+    encryptedPrivateKey: text('encrypted_private_key').notNull(),
+    encryptionKeyId: varchar('encryption_key_id', { length: 255 })
+      .notNull()
+      .default('master-key-v1'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  table => ({
+    userIdIdx: index('idx_wallets_user_id').on(table.userId),
+    addressIdx: index('idx_wallets_address').on(table.address),
   })
 );
 
@@ -165,6 +194,9 @@ export const executions = pgTable(
     quoteId: uuid('quote_id')
       .notNull()
       .references(() => quotes.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
     userAddress: varchar('user_address', { length: 255 }).notNull(),
     txHash: varchar('tx_hash', { length: 255 }),
     chainId: integer('chain_id')
@@ -183,6 +215,7 @@ export const executions = pgTable(
   },
   table => ({
     intentIdIdx: index('idx_executions_intent_id').on(table.intentId),
+    userIdIdx: index('idx_executions_user_id').on(table.userId),
     txHashIdx: index('idx_executions_tx_hash').on(table.txHash),
     stateIdx: index('idx_executions_state').on(table.state),
     createdAtIdx: index('idx_executions_created_at').on(table.createdAt),
