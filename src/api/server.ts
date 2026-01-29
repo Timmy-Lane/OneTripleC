@@ -17,6 +17,8 @@ import {
 import { registerIntentRoutes } from './routes/intents.js';
 import { closeIntentQueue } from '../services/queue.js';
 import { createBotService } from '../services/bot.js';
+import { createAuthService } from '../domain/auth/auth-service.js';
+import { createWalletService } from '../domain/wallet/wallet-service.js';
 
 const app = fastify({
   logger: {
@@ -212,7 +214,13 @@ const start = async () => {
 
     if (config.TELEGRAM_BOT_TOKEN) {
       app.log.info('Starting Telegram bot...');
-      botService = await createBotService(config.TELEGRAM_BOT_TOKEN);
+      const walletService = createWalletService();
+      const authService = createAuthService(walletService);
+      botService = await createBotService(
+        config.TELEGRAM_BOT_TOKEN,
+        authService,
+        walletService
+      );
       app.log.info('Telegram bot started');
     } else {
       app.log.warn('TELEGRAM_BOT_TOKEN not set, bot will not start');

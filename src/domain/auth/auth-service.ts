@@ -13,6 +13,7 @@ export interface GetOrCreateUserInput {
 export interface User {
   id: string;
   walletAddress: string;
+  isNewUser: boolean;
 }
 
 export interface AuthService {
@@ -38,6 +39,7 @@ export function createAuthService(walletService: WalletService): AuthService {
       return {
         id: existingUser.id,
         walletAddress: wallet.address,
+        isNewUser: false,
       };
     }
 
@@ -73,6 +75,7 @@ export function createAuthService(walletService: WalletService): AuthService {
     return {
       id: user.id,
       walletAddress: wallet.address,
+      isNewUser: true,
     };
   }
 
