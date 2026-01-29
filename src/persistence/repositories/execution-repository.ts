@@ -9,6 +9,7 @@ export type NewExecution = typeof executions.$inferInsert;
 export async function createExecution(data: {
   intentId: string;
   quoteId: string;
+  userId: string;
   userAddress: string;
   chainId: number;
 }): Promise<ExecutionRow> {
@@ -17,6 +18,7 @@ export async function createExecution(data: {
     .values({
       intentId: data.intentId,
       quoteId: data.quoteId,
+      userId: data.userId,
       userAddress: data.userAddress,
       chainId: data.chainId,
       state: 'PENDING',
