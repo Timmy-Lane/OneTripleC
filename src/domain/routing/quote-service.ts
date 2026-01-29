@@ -260,3 +260,9 @@ export class QuoteService {
 export function createQuoteService(config: QuoteServiceConfig): QuoteService {
   return new QuoteService(config);
 }
+
+// Default singleton instance for backwards compatibility
+export const quoteService = new QuoteService({
+  chainId: 1,
+  rpcUrl: process.env.ETHEREUM_RPC_URL || 'https://eth.llamarpc.com',
+});

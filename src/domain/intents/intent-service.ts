@@ -6,7 +6,11 @@ import {
   updateIntentWithValidation,
   type IntentRow,
 } from '../../persistence/repositories/intent-repository.js';
-import { enqueueParseIntent, enqueueFetchQuotes } from '../../services/queue.js';
+import {
+  enqueueParseIntent,
+  enqueueFetchQuotes,
+  enqueueExecuteIntent,
+} from '../../services/queue.js';
 import { quoteService } from '../routing/quote-service.js';
 import { createQuote, findQuoteById, markQuoteAccepted } from '../../persistence/repositories/quote-repository.js';
 import { createExecution } from '../../persistence/repositories/execution-repository.js';
@@ -39,9 +43,6 @@ function rowToIntent(row: IntentRow): Intent {
     sourceToken: row.sourceToken,
     targetToken: row.targetToken,
     sourceAmount: row.sourceAmount,
-    minTargetAmount: row.minTargetAmount,
-    slippageBps: row.slippageBps,
-    parsingConfidence: row.parsingConfidence,
     state: row.state as IntentState,
     errorMessage: row.errorMessage,
     createdAt: row.createdAt.toISOString(),
@@ -373,13 +374,17 @@ export class IntentService {
     const execution = await createExecution({
       intentId,
       quoteId,
+      userId: intent.userId,
       userAddress: '0x0000000000000000000000000000000000000000',
       chainId: intent.sourceChainId!,
     });
 
+    // Enqueue execution job
+    await enqueueExecuteIntent(execution.id);
+
     logger.info(
       { intentId, quoteId, executionId: execution.id },
-      'Intent accepted, execution created'
+      'Intent accepted, execution job enqueued'
     );
 
     return {
