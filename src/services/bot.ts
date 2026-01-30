@@ -2,6 +2,9 @@ import { Telegraf } from 'telegraf';
 import { TelegramClient } from '../adapters/telegram/telegram-client.js';
 import type { AuthService } from '../domain/auth/auth-service.js';
 import type { WalletService } from '../domain/wallet/wallet-service.js';
+import { getViemClient } from '../adapters/blockchain/viem-client.js';
+import { config } from '../shared/config/index.js';
+import { formatEther, type Address } from 'viem';
 
 export class BotService {
    private client: TelegramClient;
@@ -21,31 +24,42 @@ export class BotService {
       this.setupHandlers();
    }
 
-   private async showMainMenu(ctx: any, userId: string): Promise<void> {
+   private async getEthBalance(address: Address): Promise<string> {
+      try {
+         const client = getViemClient(1, config.ETHEREUM_RPC_URL);
+         const balance = await client.getBalance({ address });
+         return formatEther(balance);
+      } catch (error) {
+         console.error('Error fetching ETH balance:', error);
+         return '0.00';
+      }
+   }
+
+   private async showMainMenu(
+      ctx: any,
+      userId: string,
+      editMessage = false
+   ): Promise<void> {
       const wallet = await this.walletService.getWalletByUserId(userId);
       if (!wallet) {
          await ctx.reply('Error: Wallet not found');
          return;
       }
 
-      // Truncate wallet address for display
-      const truncatedAddress = `${wallet.address.slice(
-         0,
-         6
-      )}...${wallet.address.slice(-4)}`;
+      // Fetch real balance from blockchain
+      const ethBalance = await this.getEthBalance(wallet.address as Address);
 
-      // TODO: Fetch real balances from blockchain
-      // For now, showing placeholder values
       const message = `🏠 OneTripleC
 
-Wallet:
-${truncatedAddress}
+<b>Wallet:</b>
+<code>${wallet.address}</code>
 
-Balance:
-ETH: 0.00
-USDC: 0.00`;
+<b>Balance:</b>
+ETH - ${ethBalance}
+USDC - 0.00`;
 
-      await ctx.reply(message, {
+      const keyboard = {
+         parse_mode: 'HTML' as const,
          reply_markup: {
             inline_keyboard: [
                [
@@ -62,7 +76,13 @@ USDC: 0.00`;
                [{ text: '⚙️ Wallet', callback_data: 'wallet' }],
             ],
          },
-      });
+      };
+
+      if (editMessage && ctx.callbackQuery?.message) {
+         await ctx.editMessageText(message, keyboard);
+      } else {
+         await ctx.reply(message, keyboard);
+      }
    }
 
    private setupHandlers(): void {
@@ -101,16 +121,17 @@ USDC: 0.00`;
 I help you swap tokens across chains with ONE confirmation.
 
 Your wallet has been created.
-Address:
-\`${wallet.address}\`
 
-Private Key:
-\`${privateKey}\`
+<b>Address:</b>
+<code>${wallet.address}</code>
 
-IMPORTANT: Save your private key securely. This is the only time it will be shown.`;
+<b>Private Key:</b>
+<code>${privateKey}</code>
+
+<b>IMPORTANT:</b> Save your private key securely. This is the only time it will be shown.`;
 
                await ctx.reply(message, {
-                  parse_mode: 'Markdown',
+                  parse_mode: 'HTML',
                   reply_markup: {
                      inline_keyboard: [
                         [{ text: '▶ Start', callback_data: 'start' }],
@@ -131,23 +152,27 @@ IMPORTANT: Save your private key securely. This is the only time it will be show
 
       // Handle Start button - show main menu
       this.bot.action('start', async ctx => {
-         await ctx.answerCbQuery();
-         const telegramId = ctx.from?.id;
-         if (!telegramId) {
-            await ctx.reply('Error: Could not identify user');
-            return;
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            await this.showMainMenu(ctx, user.id);
+         } catch (error) {
+            console.error('Error in start handler:', error);
          }
-
-         const user = await this.authService.getOrCreateUser({
-            provider: 'telegram',
-            providerId: telegramId.toString(),
-            metadata: {
-               username: ctx.from?.username,
-               first_name: ctx.from?.first_name,
-            },
-         });
-
-         await this.showMainMenu(ctx, user.id);
       });
 
       // Handle Settings button
@@ -188,28 +213,198 @@ IMPORTANT: Save your private key securely. This is the only time it will be show
       });
 
       this.bot.action('refresh_balance', async ctx => {
-         await ctx.answerCbQuery();
-         const telegramId = ctx.from?.id;
-         if (!telegramId) {
-            await ctx.reply('Error: Could not identify user');
-            return;
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            await this.showMainMenu(ctx, user.id, true);
+         } catch (error) {
+            console.error('Error in refresh_balance handler:', error);
          }
-
-         const user = await this.authService.getOrCreateUser({
-            provider: 'telegram',
-            providerId: telegramId.toString(),
-            metadata: {
-               username: ctx.from?.username,
-               first_name: ctx.from?.first_name,
-            },
-         });
-
-         await this.showMainMenu(ctx, user.id);
       });
 
       this.bot.action('wallet', async ctx => {
+         try {
+            // Answer callback query FIRST to prevent timeout
+            await ctx.answerCbQuery();
+
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            const wallet = await this.walletService.getWalletByUserId(user.id);
+            if (!wallet) {
+               await ctx.reply('Error: Wallet not found');
+               return;
+            }
+
+            const message = `👛 Wallet
+
+Wallet List:
+Active Wallet
+
+Address:
+<code>${wallet.address}</code>
+
+Network:
+Ethereum`;
+
+            const keyboard = {
+               parse_mode: 'HTML' as const,
+               reply_markup: {
+                  inline_keyboard: [
+                     [{ text: 'Add Wallet', callback_data: 'add_wallet' }],
+                     [
+                        {
+                           text: 'Show Private Key',
+                           callback_data: 'show_private_key',
+                        },
+                     ],
+                     [
+                        {
+                           text: 'Change Active Wallet',
+                           callback_data: 'change_active_wallet',
+                        },
+                     ],
+                     [
+                        {
+                           text: 'Delete Wallet',
+                           callback_data: 'delete_wallet',
+                        },
+                     ],
+                     [
+                        {
+                           text: 'Change Network',
+                           callback_data: 'change_network',
+                        },
+                     ],
+                     [{ text: 'Back', callback_data: 'back_to_main' }],
+                  ],
+               },
+            };
+
+            if (ctx.callbackQuery?.message) {
+               await ctx.editMessageText(message, keyboard);
+            } else {
+               await ctx.reply(message, keyboard);
+            }
+         } catch (error) {
+            console.error('Error in wallet handler:', error);
+         }
+      });
+
+      // Handle wallet action button handlers
+      this.bot.action('add_wallet', async ctx => {
          await ctx.answerCbQuery();
-         await ctx.reply('Wallet settings coming soon!');
+         await ctx.reply('Add wallet functionality coming soon!');
+      });
+
+      this.bot.action('show_private_key', async ctx => {
+         try {
+            // Answer callback query FIRST to prevent timeout
+            await ctx.answerCbQuery();
+
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            const wallet = await this.walletService.getWalletByUserId(user.id);
+            if (!wallet) {
+               await ctx.reply('Error: Wallet not found');
+               return;
+            }
+
+            const privateKey = await this.walletService.getPrivateKey(
+               wallet.id
+            );
+
+            await ctx.reply(
+               `⚠️ SECURITY WARNING ⚠️
+
+Your Private Key:
+<code>${privateKey}</code>
+
+NEVER share this with anyone!
+Anyone with this key has full access to your wallet.`,
+               { parse_mode: 'HTML' }
+            );
+         } catch (error) {
+            console.error('Error in show_private_key handler:', error);
+         }
+      });
+
+      this.bot.action('change_active_wallet', async ctx => {
+         await ctx.answerCbQuery();
+         await ctx.reply('Change active wallet functionality coming soon!');
+      });
+
+      this.bot.action('delete_wallet', async ctx => {
+         await ctx.answerCbQuery();
+         await ctx.reply('Delete wallet functionality coming soon!');
+      });
+
+      this.bot.action('change_network', async ctx => {
+         await ctx.answerCbQuery();
+         await ctx.reply('Change network functionality coming soon!');
+      });
+
+      this.bot.action('back_to_main', async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            await this.showMainMenu(ctx, user.id, true);
+         } catch (error) {
+            console.error('Error in back_to_main handler:', error);
+         }
       });
    }
 
