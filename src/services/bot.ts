@@ -46,7 +46,6 @@ export class BotService {
          return;
       }
 
-      // Fetch real balance from blockchain
       const ethBalance = await this.getEthBalance(wallet.address as Address);
 
       const message = `🏠 OneTripleC
@@ -56,7 +55,8 @@ export class BotService {
 
 <b>Balance:</b>
 ETH - ${ethBalance}
-USDC - 0.00`;
+USDC - 0.00
+USDT - 0.00`;
 
       const keyboard = {
          parse_mode: 'HTML' as const,
@@ -264,13 +264,13 @@ Your wallet has been created.
 
             const message = `👛 Wallet
 
-Wallet List:
+<b>Wallet List:</b>
 Active Wallet
 
-Address:
+<b>Address:</b>
 <code>${wallet.address}</code>
 
-Network:
+<b>Network:</b>
 Ethereum`;
 
             const keyboard = {
