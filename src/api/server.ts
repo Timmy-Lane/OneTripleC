@@ -22,6 +22,7 @@ import { closeIntentQueue } from '../services/queue.js';
 import { createBotService } from '../services/bot.js';
 import { createAuthService } from '../domain/auth/auth-service.js';
 import { createWalletService } from '../domain/wallet/wallet-service.js';
+import { errorHandler } from './middleware/error-handler.js';
 
 const app = fastify({
    logger: {
@@ -76,38 +77,8 @@ function registerHooks() {
 }
 
 function registerErrorHandler() {
-   app.setErrorHandler(
-      (
-         error: Error & { statusCode?: number; code?: string },
-         request,
-         reply
-      ) => {
-         request.log.error(
-            {
-               err: error,
-               reqId: request.id,
-               method: request.method,
-               url: request.url,
-            },
-            'Request failed'
-         );
-
-         const statusCode = error.statusCode || 500;
-         const isClientError = statusCode >= 400 && statusCode < 500;
-
-         return reply.status(statusCode).send({
-            error: {
-               message: isClientError ? error.message : 'Internal server error',
-               code: error.code || 'INTERNAL_ERROR',
-               statusCode,
-               ...(config.LOG_LEVEL === 'debug' &&
-                  !isClientError && {
-                     stack: error.stack,
-                  }),
-            },
-         });
-      }
-   );
+   // Use custom error handler that maps domain errors to HTTP responses
+   app.setErrorHandler(errorHandler);
 }
 
 function registerRoutes() {

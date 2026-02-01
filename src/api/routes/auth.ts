@@ -67,6 +67,35 @@ export async function authRoutes(
       }
    });
 
+   fastify.post(
+      '/auth/refresh',
+      {
+         onRequest: [authMiddleware],
+      },
+      async (request, reply) => {
+         // userId and telegramId are attached by authMiddleware
+         const { userId, telegramId } = request;
+
+         if (!userId || !telegramId) {
+            return reply.code(401).send({
+               error: 'Unauthorized',
+               message: 'Invalid token payload',
+            });
+         }
+
+         fastify.log.info({ userId }, 'Refreshing JWT token');
+
+         const newToken = generateToken({
+            userId,
+            telegramId,
+         });
+
+         return reply.code(200).send({
+            token: newToken,
+         });
+      }
+   );
+
    fastify.get(
       '/auth/me',
       {

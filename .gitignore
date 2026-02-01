@@ -1,7 +1,6 @@
 .env
 .env.local
 .env.*.local
-.mcp.json
 .claude/settings.local.json
 node_modules/
 dist/
@@ -32,5 +31,4 @@ temp/
 .cache/
 *.tmp
 *.bak
-# Drizzle
 src/persistence/migrations/meta/

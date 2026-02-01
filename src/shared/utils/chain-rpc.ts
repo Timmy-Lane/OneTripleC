@@ -25,3 +25,7 @@ export function getChainName(chainId: number): string {
          return 'Unknown';
    }
 }
+
+export function isChainSupported(chainId: number): boolean {
+   return chainId === 1 || chainId === 8453 || chainId === 42161;
+} // remove
