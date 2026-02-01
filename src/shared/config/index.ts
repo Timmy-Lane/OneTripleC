@@ -28,6 +28,12 @@ const envSchema = z.object({
     .string()
     .length(64, 'WALLET_MASTER_KEY must be 64 hex characters (32 bytes)'),
 
+  // JWT Authentication
+  JWT_SECRET: z
+    .string()
+    .min(32, 'JWT_SECRET must be at least 32 characters'),
+  JWT_EXPIRES_IN: z.string().default('7d'),
+
   // External APIs
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   
