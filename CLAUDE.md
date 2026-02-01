@@ -106,10 +106,9 @@ OneTripleC is a **custodial wallet and execution backend** with channel-agnostic
 - `db.ts`: Drizzle client setup
 - `models/schema.ts`: Database schema (tables, enums, indexes)
 - `repositories/`: CRUD operations per entity
-  - `user-repository.ts`: User CRUD (channel-agnostic)
-  - `credential-repository.ts`: User authentication credentials (Telegram, email, OAuth)
+  - `user-repository.ts`: User CRUD (Telegram-based)
   - `wallet-repository.ts`: Wallet CRUD and encrypted key storage
-  - `intent-repository.ts`, `quote-repository.ts`, `execution-repository.ts`: Unchanged
+  - `intent-repository.ts`, `quote-repository.ts`, `execution-repository.ts`: Intent lifecycle
 
 ### 5. Workers Layer (`src/workers/`)
 
@@ -145,26 +144,23 @@ OneTripleC is a **custodial wallet and execution backend** with channel-agnostic
 ## User Identity Model (Channel-Agnostic)
 
 ### Core Principle
-User identity is independent of any interface. Users can authenticate via Telegram, email, OAuth, or future methods.
+User identity is based on Telegram authentication for v1. Future versions may support additional authentication methods.
 
 ### Database Schema
 
 ```typescript
-// users: core identity (channel-agnostic)
+// users: user identity (Telegram-based for v1)
 users:
   - id (UUID, PK)
+  - telegram_id (bigint, UNIQUE)
+  - telegram_username (text)
+  - telegram_first_name (text)
+  - telegram_last_name (text)
+  - is_active (boolean)
+  - is_blocked (boolean)
+  - preferences (jsonb)
   - created_at
   - updated_at
-
-// user_credentials: authentication methods (1:many with users)
-user_credentials:
-  - id (UUID, PK)
-  - user_id (UUID, FK → users.id)
-  - provider (enum: 'telegram' | 'email' | 'google' | 'apple')
-  - provider_user_id (text: telegram_id, email, oauth_sub)
-  - metadata (jsonb: provider-specific data)
-  - created_at
-  - UNIQUE(provider, provider_user_id)
 
 // wallets: one EOA per user
 wallets:
@@ -243,15 +239,15 @@ const hash = await client.sendTransaction(tx);
 
 ## Data Flow
 
-### User Signup (Any Interface)
+### User Signup (Telegram)
 
-1. User signs up via Telegram/Web/WebApp
-2. Interface calls `AuthService.getOrCreateUser({ provider, providerId, metadata })`
-3. AuthService creates user in `users` table
-4. AuthService creates credential in `user_credentials` table
-5. WalletService generates new EOA keypair (viem)
-6. WalletService encrypts private key with master key
-7. WalletService creates wallet in `wallets` table
+1. User sends `/start` to Telegram bot
+2. Bot calls `AuthService.getOrCreateUser({ provider: 'telegram', providerId: telegramId, metadata })`
+3. AuthService creates user in `users` table (if new)
+4. WalletService generates new EOA keypair (viem)
+5. WalletService encrypts private key with master key
+6. WalletService creates wallet in `wallets` table
+7. Backend generates JWT token for user
 8. User receives wallet address immediately
 
 ### Interface → Create Intent
@@ -278,6 +274,181 @@ const hash = await client.sendTransaction(tx);
 8. Monitoring worker polls RPC, updates execution state on confirmation
 9. Notification worker sends message to user via their interface
 
+## API Architecture & Authentication
+
+### Why APIs Are Necessary
+
+OneTripleC has **separate processes** that need to communicate:
+
+1. **Telegram Bot** (or other interfaces) - receives user messages
+2. **Fastify Backend Server** - has database access, domain logic, workers
+
+These processes cannot share memory or call functions directly. They communicate via **HTTP APIs**.
+
+### Current API Routes
+
+**Implemented (src/api/routes/intents.ts):**
+- `POST /intents` - Create intent from user message
+- `GET /intents/:id` - Get intent status
+- `GET /intents/:id/quotes` - Get available quotes
+- `POST /intents/:id/accept` - Accept quote and trigger execution
+
+**Missing (need to implement):**
+- `GET /wallets` - Get wallet for authenticated user
+- `GET /wallets/:id` - Get wallet details
+- `GET /executions/:id` - Get execution status
+- `GET /executions` - List user executions
+- `POST /auth/telegram` - Authenticate Telegram user, return JWT
+- `GET /auth/me` - Get current user info
+
+### Authentication Flow (JWT)
+
+**Current Problem:**
+Routes accept `userId` in request body - **INSECURE** (anyone can pretend to be any user)
+
+```typescript
+// CURRENT - INSECURE
+fastify.post('/intents', async (request) => {
+  const { userId, rawMessage } = request.body; // userId from body - anyone can fake this!
+});
+```
+
+**Solution: JWT Authentication**
+
+**Step 1: User Authentication**
+When Telegram user sends `/start`:
+```typescript
+// Telegram bot verifies user via Telegram API
+const telegramId = ctx.from.id; // Guaranteed by Telegram
+
+// Create or get user from backend
+const user = await authService.getOrCreateUser({
+  provider: 'telegram',
+  providerId: telegramId.toString(),
+  metadata: { username: ctx.from.username }
+});
+
+// Generate JWT token (signed by backend)
+const token = jwt.sign(
+  { userId: user.id, telegramId },
+  process.env.JWT_SECRET,
+  { expiresIn: '7d' }
+);
+
+// Store token for this chat session
+userSessions.set(ctx.chat.id, token);
+```
+
+**Step 2: API Requests Include JWT**
+```typescript
+// Telegram bot includes JWT in all API requests
+const token = userSessions.get(ctx.chat.id);
+
+await fetch('http://localhost:3000/intents', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${token}` // JWT here
+  },
+  body: JSON.stringify({
+    rawMessage: userMessage
+    // NO userId in body!
+  })
+});
+```
+
+**Step 3: API Middleware Extracts User**
+```typescript
+// src/api/middleware/auth.ts (NEEDS TO BE IMPLEMENTED)
+fastify.addHook('onRequest', async (request, reply) => {
+  const authHeader = request.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return reply.code(401).send({ error: 'Missing or invalid token' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    request.userId = decoded.userId; // Attach verified userId to request
+  } catch (err) {
+    return reply.code(401).send({ error: 'Invalid or expired token' });
+  }
+});
+```
+
+**Step 4: Routes Use Verified UserId**
+```typescript
+// src/api/routes/intents.ts (NEEDS UPDATE)
+fastify.post('/intents', async (request) => {
+  const { rawMessage } = request.body;
+  const userId = request.userId; // From JWT middleware - SECURE!
+
+  const intent = await intentService.createIntent({ userId, rawMessage });
+  return intent;
+});
+```
+
+### JWT Benefits
+
+1. **Cryptographically Signed**: Only backend can create valid tokens
+2. **Cannot Be Forged**: Requires secret key to generate
+3. **Stateless**: No session storage needed (token contains user info)
+4. **Expiration**: Tokens expire after set time (e.g., 7 days)
+5. **Revocable**: Can blacklist tokens if needed
+
+### Security Model
+
+**Current State (INSECURE):**
+- Routes trust `userId` from request body
+- No verification of user identity
+- User A can access User B's wallet and intents
+
+**Target State (SECURE):**
+- All routes require JWT in `Authorization` header
+- JWT verified by middleware before route handler
+- `userId` extracted from verified JWT, not request body
+- 401 Unauthorized returned for missing/invalid tokens
+
+### Implementation TODO
+
+**1. Auth Middleware** (`src/api/middleware/auth.ts`)
+- Extract JWT from `Authorization` header
+- Verify JWT signature with `JWT_SECRET`
+- Attach `userId` to request object
+- Return 401 for invalid/missing tokens
+
+**2. Update Existing Routes**
+- Remove `userId` from request body validation
+- Use `request.userId` from auth middleware
+- All routes require authentication
+
+**3. New Auth Routes** (`src/api/routes/auth.ts`)
+- `POST /auth/telegram` - Verify Telegram data, return JWT
+- `POST /auth/refresh` - Refresh expired JWT
+- `GET /auth/me` - Get current user info
+
+**4. Telegram Bot Updates**
+- Call `/auth/telegram` on `/start` to get JWT
+- Store JWT in session (Redis or in-memory map)
+- Include JWT in all API requests
+- Handle 401 errors (re-authenticate)
+
+### Environment Variables
+
+Add to `.env`:
+```bash
+# JWT Authentication
+JWT_SECRET=<generate-with-openssl-rand-hex-32>
+JWT_EXPIRES_IN=7d
+```
+
+Generate JWT secret:
+```bash
+openssl rand -hex 32
+```
+
 ## Folder Structure
 
 ```
@@ -297,7 +468,7 @@ src/
 │   └── execution/        # Transaction building and signing
 ├── persistence/          # Database access (repositories, Drizzle)
 │   ├── models/           # Database schema
-│   └── repositories/     # users, credentials, wallets, intents, quotes, executions
+│   └── repositories/     # users, wallets, intents, quotes, executions
 ├── workers/              # Background jobs (BullMQ workers)
 ├── adapters/             # External clients (blockchain, DEX, bridge, Telegram)
 ├── services/             # Infrastructure (Redis, queue setup)
@@ -328,8 +499,7 @@ OneTripleC's database follows these principles:
 
 | Table | Purpose | Status |
 |-------|---------|--------|
-| users | Channel-agnostic user identity | REQUIRED |
-| user_credentials | Authentication methods (Telegram, email, OAuth) | REQUIRED |
+| users | User identity (Telegram-based) | REQUIRED |
 | wallets | EOA wallets (one per user) | REQUIRED |
 | intents | Intent lifecycle | REQUIRED |
 | quotes | Route options | REQUIRED |
@@ -644,10 +814,10 @@ bun run src/workers/index.ts
 ### Testing the Flow
 
 ```sh
-# Create an intent (replace USER_ID with a valid user UUID)
+# Create an intent (replace USER_ID with a valid user UUID and provide intent message)
 curl -X POST http://localhost:3000/intents \
   -H "Content-Type: application/json" \
-  -d '{"userId": "USER_ID", "rawMessage": "swap 100 USDC to ETH"}'
+  -d '{"userId": "USER_ID", "rawMessage": "your intent message"}'
 
 # Check intent status
 curl http://localhost:3000/intents/INTENT_ID
@@ -704,9 +874,9 @@ const adapter = new UniswapV2Adapter({
 
 const quote = await adapter.getQuote({
   chainId: 1,
-  fromToken: USDC_ADDRESS,
-  toToken: WETH_ADDRESS,
-  amount: parseUnits('1000', 6),
+  fromToken: TOKEN_A_ADDRESS,
+  toToken: TOKEN_B_ADDRESS,
+  amount: parseUnits('amount', decimals),
   side: 'BUY',
   slippageBps: 50
 });
@@ -764,9 +934,9 @@ const adapter = new UniswapV3Adapter({
 
 const quote = await adapter.getQuote({
   chainId: 1,
-  fromToken: USDC_ADDRESS,
-  toToken: WETH_ADDRESS,
-  amount: parseUnits('1000', 6),
+  fromToken: TOKEN_A_ADDRESS,
+  toToken: TOKEN_B_ADDRESS,
+  amount: parseUnits('amount', decimals),
   side: 'BUY',
   slippageBps: 50
 });
@@ -801,9 +971,9 @@ const quoteService = createQuoteService({
 const quotes = await quoteService.fetchQuotes({
   sourceChainId: 1,
   targetChainId: 1,
-  sourceToken: USDC_ADDRESS,
-  targetToken: WETH_ADDRESS,
-  sourceAmount: '1000000000', // 1000 USDC (6 decimals)
+  sourceToken: TOKEN_A_ADDRESS,
+  targetToken: TOKEN_B_ADDRESS,
+  sourceAmount: 'amount_in_wei',
   slippageBps: 50
 });
 

@@ -16,7 +16,7 @@ Backend generates EOA wallet automatically
            ↓
 User receives wallet address immediately (no MetaMask, no WalletConnect)
            ↓
-User sends intent: "Swap 100 USDC to ETH"
+User sends intent via interface
            ↓
 System fetches quotes → User confirms
            ↓
@@ -83,7 +83,7 @@ User receives tx hash + execution report
 6. User receives wallet address immediately
 
 **Intent Execution:**
-1. User sends intent: "swap 100 USDC to ETH"
+1. User sends intent via interface
 2. Backend parses intent, fetches quotes from DEXs
 3. User confirms quote
 4. Backend retrieves user's wallet, decrypts private key
@@ -91,6 +91,31 @@ User receives tx hash + execution report
 6. Transaction submitted to blockchain
 7. Backend monitors confirmation
 8. User receives notification via their interface
+
+### API & Authentication Architecture
+
+**Process Separation:**
+- Telegram Bot (interface) and Backend Server (business logic) run as separate processes
+- Communication happens via HTTP REST APIs
+- JWT tokens authenticate users across all requests
+
+**Authentication Flow:**
+1. User starts interaction (e.g., Telegram `/start`)
+2. Interface authenticates user via provider-specific method (Telegram ID)
+3. Backend generates JWT token (cryptographically signed)
+4. Interface stores JWT and includes it in all API requests
+5. API middleware verifies JWT and extracts `userId`
+6. Routes use verified `userId` (not from request body)
+
+**API Endpoints:**
+- `POST /intents` - Create new intent
+- `GET /intents/:id` - Get intent status
+- `GET /intents/:id/quotes` - Get available quotes
+- `POST /intents/:id/accept` - Accept quote and execute
+- `GET /wallets` - Get user's wallet (requires JWT)
+- `GET /executions/:id` - Get execution status (requires JWT)
+
+All routes require `Authorization: Bearer <token>` header for security.
 
 ### Supported v1 Scope
 - **Networks**: Ethereum, Base, Arbitrum (same-chain swaps only initially)
@@ -125,7 +150,7 @@ OneTripleC/
 │   ├── workers/                   # BullMQ background workers
 │   ├── persistence/               # Database (PostgreSQL + Drizzle ORM)
 │   │   ├── models/                # Database schema
-│   │   └── repositories/          # users, credentials, wallets, intents, quotes, executions
+│   │   └── repositories/          # users, wallets, intents, quotes, executions
 │   └── shared/                    # Shared utilities & types
 ├── docs/                          # Technical documentation
 │   └── ARCHITECTURE.md            # Comprehensive architecture design
@@ -262,20 +287,15 @@ docker compose down -v      # Stop and remove everything including data
 ### Core Tables
 
 ```typescript
-// users: channel-agnostic identity
+// users: user identity (Telegram-based for v1)
 users:
   - id (UUID, PK)
+  - telegram_id (bigint, UNIQUE)
+  - telegram_username (text)
+  - telegram_first_name (text)
+  - telegram_last_name (text)
   - created_at
   - updated_at
-
-// user_credentials: authentication methods (Telegram, email, OAuth)
-user_credentials:
-  - id (UUID, PK)
-  - user_id (FK → users.id)
-  - provider (enum: 'telegram' | 'email' | 'google' | 'apple')
-  - provider_user_id (text)
-  - metadata (jsonb)
-  - UNIQUE(provider, provider_user_id)
 
 // wallets: one EOA per user
 wallets:
@@ -421,7 +441,7 @@ app.post('/auth/email/register', async (req, reply) => {
 fetch('/intents', {
   method: 'POST',
   headers: { 'Authorization': `Bearer ${token}` },
-  body: JSON.stringify({ rawMessage: 'swap 100 USDC to ETH' })
+  body: JSON.stringify({ rawMessage: userIntent })
 });
 ```
 

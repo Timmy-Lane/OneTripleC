@@ -116,9 +116,9 @@ async function main() {
     const user = await getOrCreateTestUser();
 
     const testMessages = [
-      'swap 100 USDC to ETH',
-      'bridge 50 USDC from Ethereum to Base',
-      'send 1 ETH to 0x1234567890123456789012345678901234567890',
+      'test intent message 1',
+      'test intent message 2',
+      'test intent message 3',
     ];
 
     for (const message of testMessages) {

@@ -211,7 +211,7 @@ export class IntentService {
    * In real implementation, this would use NLP or structured parsing.
    *
    * This stub simulates:
-   * - Success: if rawMessage contains "swap"
+   * - Success: returns dummy data for testing
    * - Failure: if rawMessage contains "fail"
    * - Random failure: 10% chance otherwise
    */
@@ -222,19 +222,18 @@ export class IntentService {
     }
 
     // Simulate random failure (10% chance)
-    if (Math.random() < 0.1 && !rawMessage.toLowerCase().includes('swap')) {
+    if (Math.random() < 0.1) {
       return null;
     }
 
-    // Stubbed parsing - extract dummy fields
-    // In reality, this would use NLP to understand:
-    // "swap 100 USDC on Ethereum to ETH on Base"
+    // Stubbed parsing - returns dummy data for testing
+    // In reality, this would use NLP or rule-based parser to understand the user's intent
     return {
-      sourceChainId: 1, // Ethereum
-      targetChainId: 8453, // Base
-      sourceToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC on Ethereum
-      targetToken: '0x0000000000000000000000000000000000000000', // Native ETH
-      sourceAmount: '100000000', // 100 USDC (6 decimals)
+      sourceChainId: 1, // Example: Ethereum
+      targetChainId: 8453, // Example: Base
+      sourceToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // Example token address
+      targetToken: '0x0000000000000000000000000000000000000000', // Example native token
+      sourceAmount: '100000000', // Example amount
     };
   }
 
