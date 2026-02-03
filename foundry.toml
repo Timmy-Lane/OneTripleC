@@ -13,4 +13,4 @@ remappings = [
 ]
 
 [rpc_endpoints]
-base_sepolia = "${BASE_S_RPC}"
+ethereum_sepolia = "${TESTNET_RPC}"
