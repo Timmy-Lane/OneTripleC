@@ -39,15 +39,17 @@ export async function walletRoutes(
          const chainId = query.chainId;
 
          // Validate chain is supported
-         if (!isChainSupported(chainId)) {
+         const supported = await isChainSupported(chainId);
+         if (!supported) {
             return reply.code(400).send({
                error: 'Bad Request',
                message: `Unsupported chain ID: ${chainId}. Supported: 1 (Ethereum), 8453 (Base), 42161 (Arbitrum)`,
             });
          }
 
+         const chainName = await getChainName(chainId);
          fastify.log.info(
-            { userId, chainId, chainName: getChainName(chainId) },
+            { userId, chainId, chainName },
             'Getting wallet for user'
          );
 
@@ -82,7 +84,7 @@ export async function walletRoutes(
                id: wallet.id,
                address: wallet.address,
                chainId: chainId,
-               chainName: getChainName(chainId),
+               chainName: chainName,
                balances: {
                   eth: ethBalance,
                },
@@ -119,15 +121,17 @@ export async function walletRoutes(
          const chainId = query.chainId;
 
          // Validate chain is supported
-         if (!isChainSupported(chainId)) {
+         const supported = await isChainSupported(chainId);
+         if (!supported) {
             return reply.code(400).send({
                error: 'Bad Request',
                message: `Unsupported chain ID: ${chainId}. Supported: 1 (Ethereum), 8453 (Base), 42161 (Arbitrum)`,
             });
          }
 
+         const chainName = await getChainName(chainId);
          fastify.log.info(
-            { userId, walletId: id, chainId, chainName: getChainName(chainId) },
+            { userId, walletId: id, chainId, chainName },
             'Getting wallet by ID'
          );
 
@@ -169,7 +173,7 @@ export async function walletRoutes(
                id: wallet.id,
                address: wallet.address,
                chainId: chainId,
-               chainName: getChainName(chainId),
+               chainName: chainName,
                balances: {
                   eth: ethBalance,
                },

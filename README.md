@@ -1,470 +1,215 @@
 # OneTripleC
 
-> **Custodial wallet and cross-chain execution backend with channel-agnostic architecture**
+> **Custodial wallet and swap execution backend for Telegram**
 
-OneTripleC is a backend-first Web3 portfolio project demonstrating production-grade architecture for custodial wallet management and cross-chain intent execution. Users receive an automatic EOA wallet upon signup (via any interface: Telegram, Web, WebApp) and can execute cross-chain swaps without connecting a wallet.
+OneTripleC is a Web3 backend that provides automatic EOA wallet creation and token swap execution via Telegram bot. Users receive a wallet instantly on signup and can execute swaps without connecting an external wallet.
 
 **Portfolio Project Disclaimer**
-This is a technical demonstration project, not a production DeFi protocol. Built to showcase backend architecture, custodial wallet security, multi-interface design, and engineering discipline for hiring purposes.
+This is a technical demonstration project showcasing backend architecture, custodial wallet security, and Web3 integration.
 
 ## Core Concept
 
 ```
-User signs up via Telegram/Web/WebApp
-           ↓
+User sends /start to Telegram bot
+           |
 Backend generates EOA wallet automatically
-           ↓
-User receives wallet address immediately (no MetaMask, no WalletConnect)
-           ↓
-User sends intent via interface
-           ↓
-System fetches quotes → User confirms
-           ↓
-Backend signs and executes transaction with user's wallet
-           ↓
-User receives tx hash + execution report
+           |
+User receives wallet address immediately
+           |
+User initiates swap via bot
+           |
+System fetches quotes -> User confirms
+           |
+Backend signs and executes transaction
+           |
+User receives tx hash + explorer link
 ```
 
 **Key Principles:**
 - **Custodial simplicity**: Backend generates and securely stores private keys
-- **No wallet connection flow**: Users get wallet address immediately
-- **Channel-agnostic**: Same wallet accessible from Telegram, Web, or WebApp
+- **No wallet connection**: Users get wallet address immediately
+- **Telegram-native**: Full functionality via bot interface
 - **Backend-first**: API drives everything
-- **Explainable routing**: Net output, fees, ETA
-- **Reliability > speed**: State machines, retries, monitoring
 
-## Architecture Overview
+## Architecture
 
-### Channel-Agnostic Design
 ```
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Telegram Bot     │    │ Web UI (future)  │    │ WebApp (future)  │
-│ (Interface)      │    │ (Interface)      │    │ (Interface)      │
-└────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                                 ▼
-                      ┌──────────────────┐
-                      │ AuthService      │
-                      │ (User Identity)  │
-                      └─────────┬────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    │                       │
-                    ▼                       ▼
-         ┌──────────────────┐    ┌──────────────────┐
-         │ WalletService    │    │ IntentService    │
-         │ (EOA Custody)    │    │ (Orchestration)  │
-         └──────────────────┘    └──────────────────┘
-                    │                       │
-                    └───────────┬───────────┘
-                                │
-                                ▼
-                      ┌──────────────────┐
-                      │ ExecutionService │
-                      │ (Signs & Submits)│
-                      └──────────────────┘
-                                │
-                                ▼
-                      ┌──────────────────┐
-                      │ Blockchain (EVM) │
-                      └──────────────────┘
++------------------+
+|  Telegram Bot    |
+|  (Interface)     |
++--------+---------+
+         |
+         v
++------------------+
+|  Fastify API     |
+|  (REST + JWT)    |
++--------+---------+
+         |
+    +----+----+
+    |         |
+    v         v
++-------+  +----------+
+|Wallet |  | Intent   |
+|Service|  | Service  |
++-------+  +----+-----+
+               |
+               v
+         +----------+
+         |Execution |
+         | Service  |
+         +----+-----+
+              |
+              v
+         +----------+
+         |Blockchain|
+         +----------+
 ```
 
 ### Data Flow
 
-**User Signup (Any Interface):**
-1. User signs up via Telegram/Web/WebApp
-2. Backend creates user identity (channel-agnostic)
-3. Backend generates new EOA keypair (viem)
-4. Private key encrypted with AES-256-GCM
-5. Wallet stored in database
-6. User receives wallet address immediately
+**User Signup:**
+1. User sends `/start` to Telegram bot
+2. Backend creates user, generates EOA keypair
+3. Private key encrypted with AES-256-GCM
+4. User receives wallet address
 
-**Intent Execution:**
-1. User sends intent via interface
+**Swap Execution:**
+1. User initiates swap via bot
 2. Backend parses intent, fetches quotes from DEXs
 3. User confirms quote
-4. Backend retrieves user's wallet, decrypts private key
-5. Backend signs transaction using wallet's private key
-6. Transaction submitted to blockchain
-7. Backend monitors confirmation
-8. User receives notification via their interface
-
-### API & Authentication Architecture
-
-**Process Separation:**
-- Telegram Bot (interface) and Backend Server (business logic) run as separate processes
-- Communication happens via HTTP REST APIs
-- JWT tokens authenticate users across all requests
-
-**Authentication Flow:**
-1. User starts interaction (e.g., Telegram `/start`)
-2. Interface authenticates user via provider-specific method (Telegram ID)
-3. Backend generates JWT token (cryptographically signed)
-4. Interface stores JWT and includes it in all API requests
-5. API middleware verifies JWT and extracts `userId`
-6. Routes use verified `userId` (not from request body)
-
-**API Endpoints:**
-- `POST /intents` - Create new intent
-- `GET /intents/:id` - Get intent status
-- `GET /intents/:id/quotes` - Get available quotes
-- `POST /intents/:id/accept` - Accept quote and execute
-- `GET /wallets` - Get user's wallet (requires JWT)
-- `GET /executions/:id` - Get execution status (requires JWT)
-
-All routes require `Authorization: Bearer <token>` header for security.
-
-### Supported v1 Scope
-- **Networks**: Ethereum, Base, Arbitrum (same-chain swaps only initially)
-- **Tokens**: Whitelisted ERC20 + native tokens
-- **DEX**: Uniswap V2, Uniswap V3
-- **Bridge**: Cross-chain support (future)
-- **Interfaces**: Telegram (current), Web/WebApp (future)
+4. Backend decrypts private key, signs transaction
+5. Transaction submitted to blockchain
+6. User receives confirmation + explorer link
 
 ## Project Structure
 
 ```
 OneTripleC/
-├── src/                           # Backend application core
-│   ├── interfaces/                # Channel-specific adapters
-│   │   ├── telegram/              # Telegram bot integration
-│   │   ├── web/                   # Web UI (future)
-│   │   └── webapp/                # Telegram WebApp (future)
-│   ├── api/                       # Fastify API layer
-│   │   ├── middleware/            # Auth, rate-limiting
-│   │   └── routes/                # auth, wallets, intents, quotes, executions
-│   ├── domain/                    # Core business logic
-│   │   ├── auth/                  # User authentication (channel-agnostic)
-│   │   ├── wallet/                # Wallet creation, key encryption
-│   │   ├── intents/               # Intent processing
-│   │   ├── execution/             # Transaction signing & submission
-│   │   └── routing/               # DEX/bridge routing
-│   ├── adapters/                  # External service integrations
-│   │   ├── blockchain/            # Viem clients, RPC access
-│   │   ├── dex/                   # Uniswap V2/V3 adapters
-│   │   ├── bridge/                # Bridge adapters (future)
-│   │   └── telegram/              # Telegram Bot API client
-│   ├── workers/                   # BullMQ background workers
-│   ├── persistence/               # Database (PostgreSQL + Drizzle ORM)
-│   │   ├── models/                # Database schema
-│   │   └── repositories/          # users, wallets, intents, quotes, executions
-│   └── shared/                    # Shared utilities & types
-├── docs/                          # Technical documentation
-│   └── ARCHITECTURE.md            # Comprehensive architecture design
-├── CLAUDE.md                      # Development instructions for Claude Code
-└── README.md                      # This file
++-- src/
+|   +-- api/                    # Fastify API layer
+|   |   +-- middleware/         # Auth, rate-limiting
+|   |   +-- routes/             # auth, wallets, intents, executions
+|   +-- domain/                 # Core business logic
+|   |   +-- auth/               # User authentication
+|   |   +-- wallet/             # Wallet creation, encryption
+|   |   +-- intents/            # Intent processing
+|   |   +-- execution/          # Transaction signing
+|   |   +-- routing/            # DEX routing
+|   +-- adapters/               # External integrations
+|   |   +-- blockchain/         # Viem clients
+|   |   +-- dex/                # Uniswap V2/V3 adapters
+|   +-- workers/                # BullMQ background workers
+|   +-- persistence/            # PostgreSQL + Drizzle ORM
+|   +-- services/               # Telegram bot, queue setup
+|   +-- shared/                 # Config, types, utils
++-- docs/                       # Documentation
++-- CLAUDE.md                   # Development instructions
++-- README.md                   # This file
 ```
 
 ## Tech Stack
 
-**Backend Infrastructure:**
-- **Runtime**: Bun (not Node.js)
-- **API**: Fastify (performance + plugins)
+- **Runtime**: Bun
+- **API**: Fastify
 - **Database**: PostgreSQL + Drizzle ORM
-- **Queue**: Redis + BullMQ (async execution)
-- **Blockchain**: Viem (EVM interactions)
-- **Encryption**: Node.js crypto (AES-256-GCM)
+- **Queue**: Redis + BullMQ
+- **Blockchain**: Viem
+- **Encryption**: AES-256-GCM
+- **Bot**: grammy (Telegram Bot API)
 
-**Architecture Patterns:**
-- Channel-agnostic user identity
-- Custodial wallet management
-- Intent-based state machines
-- Asynchronous worker execution
-- Repository pattern + domain-driven design
+## V1 Scope
+
+- **Networks**: Ethereum, Base, Arbitrum (same-chain swaps)
+- **DEX**: Uniswap V2, Uniswap V3
+- **Interface**: Telegram bot only
 
 ## Local Development
 
 ### Prerequisites
 
-**Required:**
-- [Bun](https://bun.sh/) v1.0.0 or later
-- [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/install/)
+- [Bun](https://bun.sh/) v1.0.0+
+- [Docker](https://www.docker.com/get-started) + Docker Compose
 
 ### Quick Start
 
-**1. Clone and install dependencies:**
-
 ```bash
-git clone <repository>
-cd OneTripleC
+# Install dependencies
 bun install
-```
 
-**2. Start local infrastructure (PostgreSQL + Redis):**
-
-```bash
+# Start infrastructure
 docker compose up -d
-docker compose ps  # Verify containers are running
-```
 
-**3. Configure environment:**
-
-```bash
+# Configure environment
 cp .env.example .env
+# Edit .env with your values
 
-# Edit .env and set:
-# - DATABASE_URL (default works with Docker Compose)
-# - REDIS_URL (default works with Docker Compose)
-# - WALLET_ENCRYPTION_KEY (generate 32-byte hex string)
-# - RPC URLs for Ethereum, Base, Arbitrum
-# - TELEGRAM_BOT_TOKEN (optional, for Telegram bot)
-```
-
-**Generate encryption key:**
-```bash
-# Generate a secure 32-byte key for wallet encryption
+# Generate encryption key
 openssl rand -hex 32
-```
 
-**4. Initialize database:**
-
-```bash
+# Initialize database
 bun run db:generate
 bun run db:migrate
 
-# (Optional) Open Drizzle Studio to inspect database
-bun run db:studio
+# Start services (3 terminals)
+bun run dev           # API server
+bun run worker:start  # Background workers
+bun run bot:start     # Telegram bot
 ```
 
-**5. Start the backend:**
+API available at `http://localhost:3000`
+
+### Commands
 
 ```bash
-# Terminal 1: Start API server
-bun run dev
-
-# Terminal 2: Start background workers
-bun run worker:start
-
-# Terminal 3: Start Telegram bot (optional)
-bun run bot:start
-```
-
-The API will be available at `http://localhost:3000`. Health check: `http://localhost:3000/health`
-
-### Development Commands
-
-```bash
-# API & Workers
-bun run dev              # Start API server with hot reload
-bun run worker:start     # Start background workers
-bun run bot:start        # Start Telegram bot
-bun run start            # Production mode (no hot reload)
+# Development
+bun run dev              # API with hot reload
+bun run worker:start     # Workers
+bun run bot:start        # Telegram bot
 
 # Database
-bun run db:generate      # Generate Drizzle migrations
+bun run db:generate      # Generate migrations
 bun run db:migrate       # Run migrations
-bun run db:studio        # Open Drizzle Studio
+bun run db:studio        # Drizzle Studio
 
-# Code Quality
-bun run typecheck        # TypeScript type checking
+# Quality
+bun run typecheck        # Type checking
 bun run lint             # ESLint
-bun run lint:fix         # ESLint with auto-fix
-bun run format           # Prettier formatting
-bun run format:check     # Check formatting
-bun test                 # Run tests
+bun test                 # Tests
 ```
 
-### Infrastructure Details
+## Security
 
-**Docker Compose services:**
+### Encryption
+- AES-256-GCM for private keys at rest
+- Master key in env vars (dev) or KMS (production)
+- Unique IV per encrypted key
 
-- **PostgreSQL**: Port `5432`, database `onetriplec`
-- **Redis**: Port `6379`, persistence enabled
+### Access Controls
+- JWT authentication required
+- Rate limiting per user
+- Private keys never logged
 
-**Stopping infrastructure:**
+## API Endpoints
 
-```bash
-docker compose stop         # Stop containers (keeps data)
-docker compose down         # Stop and remove containers (keeps volumes)
-docker compose down -v      # Stop and remove everything including data
+```
+POST /auth/telegram      - Authenticate, get JWT
+POST /auth/refresh       - Refresh JWT
+GET  /auth/me            - Current user info
+
+GET  /wallets            - Get user wallet + balance
+GET  /wallets/:id        - Get wallet by ID
+
+POST /intents            - Create swap intent
+GET  /intents/:id        - Get intent status
+GET  /intents/:id/quotes - Get available quotes
+POST /intents/:id/accept - Accept quote, execute
+
+GET  /executions/:id     - Get execution status
 ```
 
-## Database Schema
-
-### Core Tables
-
-```typescript
-// users: user identity (Telegram-based for v1)
-users:
-  - id (UUID, PK)
-  - telegram_id (bigint, UNIQUE)
-  - telegram_username (text)
-  - telegram_first_name (text)
-  - telegram_last_name (text)
-  - created_at
-  - updated_at
-
-// wallets: one EOA per user
-wallets:
-  - id (UUID, PK)
-  - user_id (FK → users.id, UNIQUE)
-  - address (text, UNIQUE)
-  - encrypted_private_key (text)
-  - encryption_key_id (text)
-
-// intents: user intent lifecycle
-intents:
-  - id (UUID, PK)
-  - user_id (FK → users.id)
-  - raw_message (text)
-  - state (enum: CREATED, PARSING, PARSED, QUOTED, ACCEPTED, EXECUTING, COMPLETED, FAILED)
-  - source_chain_id, target_chain_id, source_token, target_token, source_amount
-  - error_message
-
-// quotes: route options for intents
-quotes:
-  - id (UUID, PK)
-  - intent_id (FK → intents.id)
-  - route (jsonb: steps, fees, provider)
-  - estimated_output, total_fee
-  - expires_at
-
-// executions: transaction execution tracking
-executions:
-  - id (UUID, PK)
-  - intent_id (FK → intents.id)
-  - quote_id (FK → quotes.id)
-  - user_address (wallet address)
-  - tx_hash (transaction hash on blockchain)
-  - state (enum: PENDING, EXECUTING, COMPLETED, FAILED)
-```
-
-## Security Model
-
-### Custodial Trade-offs
-
-**Accepted:**
-- Backend generates and stores private keys
-- Single point of failure (backend compromise = all keys exposed)
-- Regulatory implications (custodial = MSB in some jurisdictions)
-
-**UX Benefits:**
-- No wallet connection required
-- Instant onboarding (wallet address in <1 second)
-- Multi-device access (same wallet from any interface)
-- No seed phrase management for users
-
-### Security Measures
-
-**Encryption:**
-- AES-256-GCM for all private keys at rest
-- Master key stored in KMS (production) or env vars (dev)
-- Unique IV and auth tag per encrypted key
-
-**Access Controls:**
-- Rate limiting per user and operation type
-- Audit logging for all key decryption and transaction signing
-- Private keys never logged or exposed in responses
-
-**Production Hardening (Future):**
-- HSM integration for key storage
-- Multi-sig for high-value operations
-- Spending limits per user (daily/per-transaction)
-- Transaction approval flow for large amounts
-- Cold wallet for most funds, hot wallet for small amounts
-
-### Threat Model
-
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| Backend compromise | All keys exposed | Encryption at rest, KMS, rate limiting |
-| Database breach | Encrypted keys stolen | Master key stored separately, strong encryption |
-| Insider threat | Developer access | Access controls, audit logs, least privilege |
-| Phishing | User tricked | Transaction approval UI, spending limits |
-| Regulatory | Custodial = MSB | Compliance framework, KYC (future) |
-
-## What This Project Demonstrates
-
-### Backend Engineering
-- Production-grade API architecture (Fastify)
-- Custodial wallet management with encryption
-- Channel-agnostic user identity model
-- Asynchronous job processing at scale (BullMQ)
-- Database design for financial applications
-- Error handling + retry strategies
-
-### Web3 Orchestration
-- Multi-chain transaction coordination
-- DEX adapter pattern (Uniswap V2/V3)
-- Quote aggregation and routing
-- Transaction signing with viem
-- Real-time blockchain monitoring
-
-### System Design
-- Clean separation of concerns (interfaces ↔ domain ↔ persistence)
-- Intent-based user experience
-- State machine execution models
-- Extensible interface layer (Telegram → Web → WebApp)
-
-## Explicit Non-Goals
-
-**This project intentionally excludes:**
-- Non-custodial wallet architecture
-- Account Abstraction (ERC-4337)
-- Production DeFi protocol features
-- Advanced trading strategies
-- User onboarding or KYC (v1)
-- React dashboard/frontend (v1)
-- Gasless transactions or paymasters
-- Multi-sig or governance systems
-
-## Adding New Interfaces
-
-### Example: Adding Web UI
-
-**Step 1:** Implement authentication
-```typescript
-// src/interfaces/web/auth-routes.ts
-app.post('/auth/email/register', async (req, reply) => {
-  const { email, password } = req.body;
-
-  // Use existing AuthService (no core changes needed)
-  const user = await authService.getOrCreateUser({
-    provider: 'email',
-    providerId: email,
-    metadata: { email }
-  });
-
-  // WalletService already created wallet
-  const wallet = await walletService.getWalletByUserId(user.id);
-
-  return { token: generateJWT(user.id), walletAddress: wallet.address };
-});
-```
-
-**Step 2:** Use existing APIs
-```typescript
-// Web UI calls same API routes as Telegram
-fetch('/intents', {
-  method: 'POST',
-  headers: { 'Authorization': `Bearer ${token}` },
-  body: JSON.stringify({ rawMessage: userIntent })
-});
-```
-
-**No changes to core domain logic required.**
-
-## Future Extensions
-
-**Potential v2 features (not implemented):**
-- Web UI (email/password, OAuth)
-- Telegram WebApp (in-app wallet access)
-- Cross-chain bridge integration (Across, Stargate)
-- Additional DEX protocols (1inch, Paraswap)
-- Advanced routing algorithms
-- Real-time price feeds
-- Spending limits and approval flows
-- Multi-sig for high-value operations
-- Cold wallet integration
+All routes require `Authorization: Bearer <token>` header.
 
 ---
 
-**Author**: Portfolio demonstration project
-**Purpose**: Technical architecture showcase
 **Status**: Active development
-
-For detailed architecture documentation, see [ARCHITECTURE.md](./ARCHITECTURE.md)
-For development instructions, see [CLAUDE.md](./CLAUDE.md)
+**Docs**: See [CLAUDE.md](./CLAUDE.md) for development guide

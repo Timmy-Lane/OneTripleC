@@ -1,5 +1,5 @@
 ---
-description: Backend architecture for OneTripleC, a custodial wallet and cross-chain execution platform with channel-agnostic design
+description: Backend architecture for OneTripleC, a custodial wallet and swap execution platform for Telegram
 globs: '*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json'
 alwaysApply: true
 ---
@@ -8,10 +8,10 @@ alwaysApply: true
 
 ## System Overview
 
-OneTripleC is a **custodial wallet and execution backend** with channel-agnostic architecture.
+OneTripleC is a **custodial wallet and execution backend** for Telegram.
 
-- Core product: Automatic EOA wallet creation + cross-chain transaction execution
-- Multi-interface: Telegram, Web UI, WebApp (all clients, not the architecture)
+- Core product: Automatic EOA wallet creation + token swap execution
+- Interface: Telegram bot (V1)
 - Custodial model: Backend generates and securely stores private keys
 - No wallet connection required: Users get wallet address immediately on signup
 
@@ -43,21 +43,15 @@ OneTripleC is a **custodial wallet and execution backend** with channel-agnostic
 
 ## Architectural Layers
 
-### 1. Interfaces Layer (`src/interfaces/`)
+### 1. Telegram Bot (`src/services/bot.ts`)
 
-**Responsibility**: Channel-specific adapters (Telegram, Web, WebApp)
+**Responsibility**: User interface via Telegram
 
-- Each interface authenticates users via its own method
-- All interfaces use `AuthService` to get/create users
-- Returns user.id to API layer via JWT or session
-- **Interface implementations are independent and pluggable**
-
-**Key files**:
-
-- `telegram/bot.ts`: Telegram bot handlers
-- `telegram/auth.ts`: Telegram-specific authentication
-- `web/auth-routes.ts`: Email/password, OAuth (future)
-- `webapp/auth.ts`: Telegram WebApp authentication (future)
+- Handles `/start` command for user registration
+- Menu buttons for swap, wallet, settings
+- Authenticates users via Telegram ID
+- Uses `AuthService` to get/create users
+- Calls API endpoints with JWT token
 
 ### 2. API Layer (`src/api/`)
 
@@ -252,7 +246,7 @@ const hash = await client.sendTransaction(tx);
 
 ### Interface → Create Intent
 
-1. User sends message via any interface (Telegram, Web, etc.)
+1. User initiates swap via Telegram bot
 2. Interface authenticates user, gets `user.id`
 3. Interface sends `POST /intents` with JWT/session (contains `user.id`) and raw message
 4. API extracts `user.id` from auth middleware
@@ -264,7 +258,7 @@ const hash = await client.sendTransaction(tx);
 
 ### Confirm Intent → Execute
 
-1. User confirms via any interface
+1. User confirms via Telegram bot
 2. Interface sends `POST /intents/:id/accept` with quoteId
 3. API validates quote, updates state to `ACCEPTED`, enqueues `execute-intent` job
 4. Worker dequeues, calls `ExecutionService.execute()`
@@ -453,15 +447,11 @@ openssl rand -hex 32
 
 ```
 src/
-├── interfaces/           # Channel-specific adapters (Telegram, Web, WebApp)
-│   ├── telegram/         # Telegram bot integration
-│   ├── web/              # Web UI auth (future)
-│   └── webapp/           # Telegram WebApp (future)
 ├── api/                  # HTTP transport (Fastify routes)
 │   ├── middleware/       # Auth, rate-limiting, error handling
-│   └── routes/           # auth, wallets, intents, quotes, executions
+│   └── routes/           # auth, wallets, intents, executions
 ├── domain/               # Business logic (services, state machines)
-│   ├── auth/             # User authentication (channel-agnostic)
+│   ├── auth/             # User authentication
 │   ├── wallet/           # Wallet creation, key management
 │   ├── intents/          # Intent lifecycle orchestration
 │   ├── routing/          # Quote fetching and ranking
@@ -470,8 +460,8 @@ src/
 │   ├── models/           # Database schema
 │   └── repositories/     # users, wallets, intents, quotes, executions
 ├── workers/              # Background jobs (BullMQ workers)
-├── adapters/             # External clients (blockchain, DEX, bridge, Telegram)
-├── services/             # Infrastructure (Redis, queue setup)
+├── adapters/             # External clients (blockchain, DEX)
+├── services/             # Telegram bot, Redis, queue setup
 └── shared/               # Config, types, utils, constants
 ```
 
@@ -672,7 +662,7 @@ bun run db:studio     # Open Drizzle Studio
 - **Audit logging**: All key decryption and transaction signing logged
 - **Never logged**: Private keys never appear in logs, responses, or errors
 - **Spending limits**: Configurable daily/transaction limits per user (future)
-- **Interface auth**: Telegram webhook signature validation, JWT for Web/WebApp
+- **Interface auth**: Telegram ID verification, JWT for API calls
 
 ## Decision Log
 
@@ -698,53 +688,6 @@ bun run db:studio     # Open Drizzle Studio
 - External APIs change (DEXs, bridges)
 - Adapters abstract API details
 - Easy to swap implementations
-
-## Frontend (Minimal)
-
-Bun supports HTML imports for the confirmation WebApp:
-
-```ts
-import index from './index.html';
-
-Bun.serve({
-  routes: {
-    '/': index,
-  },
-  development: {
-    hmr: true,
-  },
-});
-```
-
-HTML files can import `.tsx` files directly. Bun bundles automatically.
-
----
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
 ## Intent Lifecycle
 
