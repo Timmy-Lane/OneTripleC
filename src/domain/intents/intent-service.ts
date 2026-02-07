@@ -207,34 +207,73 @@ export class IntentService {
   }
 
   /**
-   * STUBBED: Parse raw message to extract intent fields.
-   * In real implementation, this would use NLP or structured parsing.
+   * Parse raw message to extract intent fields.
+   * Supports structured JSON from Telegram bot.
    *
-   * This stub simulates:
-   * - Success: returns dummy data for testing
-   * - Failure: if rawMessage contains "fail"
-   * - Random failure: 10% chance otherwise
+   * Expected JSON format:
+   * {
+   *   "action": "swap",
+   *   "chainId": 1,
+   *   "sourceToken": "0x...",
+   *   "targetToken": "0x...",
+   *   "amount": "1000000000000000000"
+   * }
    */
   parseRawMessage(rawMessage: string): ParsedIntent | null {
-    // Simulate failure case
-    if (rawMessage.toLowerCase().includes('fail')) {
+    try {
+      const data = JSON.parse(rawMessage);
+
+      // Validate required fields
+      if (!data.action || data.action !== 'swap') {
+        logger.error({ data }, 'Invalid action - only "swap" is supported');
+        return null;
+      }
+
+      if (!data.chainId || typeof data.chainId !== 'number') {
+        logger.error({ data }, 'Missing or invalid chainId');
+        return null;
+      }
+
+      if (!data.sourceToken || typeof data.sourceToken !== 'string') {
+        logger.error({ data }, 'Missing or invalid sourceToken');
+        return null;
+      }
+
+      if (!data.targetToken || typeof data.targetToken !== 'string') {
+        logger.error({ data }, 'Missing or invalid targetToken');
+        return null;
+      }
+
+      if (!data.amount || typeof data.amount !== 'string') {
+        logger.error({ data }, 'Missing or invalid amount');
+        return null;
+      }
+
+      // Validate token addresses (basic checksum format check)
+      const addressRegex = /^0x[a-fA-F0-9]{40}$/;
+      if (!addressRegex.test(data.sourceToken)) {
+        logger.error({ sourceToken: data.sourceToken }, 'Invalid sourceToken address format');
+        return null;
+      }
+
+      if (!addressRegex.test(data.targetToken)) {
+        logger.error({ targetToken: data.targetToken }, 'Invalid targetToken address format');
+        return null;
+      }
+
+      // Same-chain swaps: sourceChainId = targetChainId
+      return {
+        sourceChainId: data.chainId,
+        targetChainId: data.chainId, // V1: same-chain only
+        sourceToken: data.sourceToken,
+        targetToken: data.targetToken,
+        sourceAmount: data.amount,
+      };
+    } catch (error) {
+      // Not valid JSON - could be natural language (future: use NLP)
+      logger.error({ rawMessage, error }, 'Failed to parse raw message as JSON');
       return null;
     }
-
-    // Simulate random failure (10% chance)
-    if (Math.random() < 0.1) {
-      return null;
-    }
-
-    // Stubbed parsing - returns dummy data for testing
-    // In reality, this would use NLP or rule-based parser to understand the user's intent
-    return {
-      sourceChainId: 1, // Example: Ethereum
-      targetChainId: 8453, // Example: Base
-      sourceToken: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // Example token address
-      targetToken: '0x0000000000000000000000000000000000000000', // Example native token
-      sourceAmount: '100000000', // Example amount
-    };
   }
 
   /**
