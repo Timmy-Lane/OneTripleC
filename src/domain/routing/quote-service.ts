@@ -4,8 +4,12 @@ import { RouteStepType } from '../../shared/types/quote.js';
 import { UniswapV2Adapter } from '../../adapters/dex/uniswap-v2-adapter.js';
 import { UniswapV3Adapter } from '../../adapters/dex/uniswap-v3-adapter.js';
 import type { DexAdapter, QuoteParams, SwapQuote as InternalSwapQuote } from '../../adapters/dex/types.js';
-import { Address, parseUnits } from 'viem';
+import { Address, formatEther } from 'viem';
 import { WETH } from '../../adapters/tokens/weth.js';
+import { getViemClient } from '../../adapters/blockchain/viem-client.js';
+import { getNativePriceUsd } from '../../adapters/coingecko/index.js';
+import { AcrossAdapter } from '../../adapters/bridge/across-adapter.js';
+import type { BridgeAdapter } from '../../adapters/bridge/types.js';
 
 interface Logger {
   info(obj: object, msg?: string): void;
@@ -36,6 +40,7 @@ export interface QuoteResult {
   route: QuoteRoute;
   estimatedOutput: string;
   totalFee: string;
+  totalFeeUsd?: string;
 }
 
 export interface QuoteServiceConfig {
@@ -45,6 +50,7 @@ export interface QuoteServiceConfig {
 
 export class QuoteService {
   private dexAdapters: Map<string, DexAdapter>;
+  private bridgeAdapter: BridgeAdapter;
   private chainId: number;
   private rpcUrl: string;
 
@@ -52,12 +58,13 @@ export class QuoteService {
     this.chainId = config.chainId;
     this.rpcUrl = config.rpcUrl;
     this.dexAdapters = new Map();
-    
+    this.bridgeAdapter = new AcrossAdapter();
+
     this.dexAdapters.set('uniswap-v2', new UniswapV2Adapter({
       chainId: config.chainId,
       rpcUrl: config.rpcUrl,
     }));
-    
+
     this.dexAdapters.set('uniswap-v3', new UniswapV3Adapter({
       chainId: config.chainId,
       rpcUrl: config.rpcUrl,
@@ -106,9 +113,74 @@ export class QuoteService {
   }
 
   private async fetchCrossChainQuotes(request: QuoteRequest): Promise<QuoteResult[]> {
-    logger.info({ request }, 'Cross-chain quotes not yet implemented - returning stub');
-    
-    return [await this.buildStubCrossChainQuote(request)];
+    logger.info({ request }, 'Fetching cross-chain quotes via Across');
+
+    try {
+      const bridgeQuote = await this.bridgeAdapter.getQuote({
+        sourceChainId: request.sourceChainId,
+        destinationChainId: request.targetChainId,
+        token: request.sourceToken as Address,
+        amount: BigInt(request.sourceAmount),
+        recipient: '0x0000000000000000000000000000000000000000' as Address, // placeholder, set at execution time
+      });
+
+      if (!bridgeQuote) {
+        logger.error({ request }, 'Across bridge returned no quote');
+        return [];
+      }
+
+      const steps: RouteStep[] = [];
+
+      if (this.needsApproval(request.sourceToken)) {
+        steps.push({
+          type: RouteStepType.APPROVE,
+          chainId: request.sourceChainId,
+          protocol: 'erc20',
+          fromToken: request.sourceToken,
+          toToken: request.sourceToken,
+          fromAmount: request.sourceAmount,
+          spender: bridgeQuote.spokePoolAddress,
+          contractAddress: request.sourceToken,
+        });
+      }
+
+      steps.push({
+        type: RouteStepType.BRIDGE,
+        chainId: request.sourceChainId,
+        protocol: 'across',
+        fromToken: request.sourceToken,
+        toToken: request.targetToken,
+        fromAmount: request.sourceAmount,
+        toAmountMin: bridgeQuote.estimatedOutput.toString(),
+        contractAddress: bridgeQuote.spokePoolAddress,
+        estimatedGas: bridgeQuote.estimatedGas.toString(),
+      });
+
+      const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
+        bridgeQuote.estimatedGas.toString(),
+        '0'
+      );
+
+      return [{
+        route: {
+          steps,
+          fees: {
+            gasEstimate: bridgeQuote.estimatedGas.toString(),
+            protocolFee: '0',
+            bridgeFee: (bridgeQuote.amount - bridgeQuote.estimatedOutput).toString(),
+            dexFee: '0',
+          },
+          slippageBps: request.slippageBps || 50,
+          provider: 'across',
+        },
+        estimatedOutput: bridgeQuote.estimatedOutput.toString(),
+        totalFee,
+        totalFeeUsd,
+      }];
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch cross-chain quotes');
+      return [];
+    }
   }
 
   private buildQuoteParams(request: QuoteRequest): QuoteParams | null {
@@ -139,11 +211,11 @@ export class QuoteService {
     }
   }
 
-  private buildQuoteResult(
+  private async buildQuoteResult(
     swapQuote: InternalSwapQuote,
     request: QuoteRequest,
     adapterName: string
-  ): QuoteResult {
+  ): Promise<QuoteResult> {
     const steps: RouteStep[] = [];
 
     if (this.needsApproval(request.sourceToken)) {
@@ -172,7 +244,7 @@ export class QuoteService {
       estimatedGas: swapQuote.estimatedGas.toString(),
     });
 
-    const totalFee = this.calculateTotalFee(
+    const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
       swapQuote.estimatedGas.toString(),
       swapQuote.fee.toString()
     );
@@ -191,51 +263,7 @@ export class QuoteService {
       },
       estimatedOutput: swapQuote.toAmount.toString(),
       totalFee,
-    };
-  }
-
-  private async buildStubCrossChainQuote(request: QuoteRequest): Promise<QuoteResult> {
-    const steps: RouteStep[] = [
-      {
-        type: RouteStepType.APPROVE,
-        chainId: request.sourceChainId,
-        protocol: 'erc20',
-        fromToken: request.sourceToken,
-        toToken: request.sourceToken,
-        fromAmount: request.sourceAmount,
-        spender: '0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5',
-        contractAddress: request.sourceToken,
-      },
-      {
-        type: RouteStepType.BRIDGE,
-        chainId: request.sourceChainId,
-        protocol: 'across',
-        fromToken: request.sourceToken,
-        toToken: request.targetToken,
-        fromAmount: request.sourceAmount,
-        toAmountMin: this.estimateOutput(request.sourceAmount, 100),
-        contractAddress: '0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5',
-        estimatedGas: '200000',
-      },
-    ];
-
-    const estimatedOutput = this.estimateOutput(request.sourceAmount, 100);
-    const totalFee = '500000';
-
-    return {
-      route: {
-        steps,
-        fees: {
-          gasEstimate: '200000',
-          protocolFee: '0',
-          bridgeFee: '400000',
-          dexFee: '0',
-        },
-        slippageBps: request.slippageBps || 50,
-        provider: 'across',
-      },
-      estimatedOutput,
-      totalFee,
+      totalFeeUsd,
     };
   }
 
@@ -243,17 +271,37 @@ export class QuoteService {
     return tokenAddress !== '0x0000000000000000000000000000000000000000';
   }
 
-  private estimateOutput(inputAmount: string, slippageBps: number): string {
-    const amount = BigInt(inputAmount);
-    const slippageMultiplier = BigInt(10000 - slippageBps);
-    const estimated = (amount * slippageMultiplier) / BigInt(10000);
-    return estimated.toString();
-  }
+  private async calculateTotalFee(
+    gasEstimate: string,
+    dexFee: string
+  ): Promise<{ totalFee: string; totalFeeUsd?: string }> {
+    let gasPrice: bigint;
+    try {
+      const client = getViemClient(this.chainId, this.rpcUrl);
+      gasPrice = await client.getGasPrice();
+    } catch {
+      // fallback to 20 gwei if RPC call fails
+      gasPrice = BigInt(20) * BigInt(1e9);
+    }
 
-  private calculateTotalFee(gasEstimate: string, dexFee: string): string {
-    const gasWei = BigInt(gasEstimate) * BigInt(20) * BigInt(1e9);
+    const gasWei = BigInt(gasEstimate) * gasPrice;
     const total = gasWei + BigInt(dexFee);
-    return total.toString();
+    const totalFee = total.toString();
+
+    // convert gas cost to USD
+    let totalFeeUsd: string | undefined;
+    try {
+      const nativePrice = await getNativePriceUsd(this.chainId);
+      if (nativePrice !== null) {
+        const feeEth = Number(formatEther(total));
+        const feeUsd = feeEth * nativePrice;
+        totalFeeUsd = feeUsd.toFixed(2);
+      }
+    } catch {
+      // non-critical, skip USD conversion
+    }
+
+    return { totalFee, totalFeeUsd };
   }
 }
 

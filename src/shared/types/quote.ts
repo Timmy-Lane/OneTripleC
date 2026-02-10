@@ -40,6 +40,7 @@ export interface Quote {
   route: QuoteRoute;
   estimatedOutput: string;
   totalFee: string;
+  totalFeeUsd?: string;
   expiresAt: string;
   isAccepted: boolean;
   createdAt: string;

@@ -21,6 +21,7 @@ import { findIntentById } from '../../persistence/repositories/intent-repository
 import { ExecutionState } from '../../shared/types/index.js';
 import type { RouteStep } from '../../shared/types/quote.js';
 import { getDeadline } from '../../adapters/dex/utils/deadline.js';
+import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
 
 const VIEM_CHAINS: Record<number, Chain> = {
    1: mainnet,
@@ -30,18 +31,8 @@ const VIEM_CHAINS: Record<number, Chain> = {
    137: polygon,
 };
 
-// TODO change to parse from db
 function getRpcUrl(chainId: number): string {
-   switch (chainId) {
-      case 1:
-         return process.env.ETHEREUM_RPC_URL!;
-      case 8453:
-         return process.env.BASE_RPC_URL!;
-      case 42161:
-         return process.env.ARBITRUM_RPC_URL!;
-      default:
-         throw new Error(`RPC URL not configured for chain: ${chainId}`);
-   }
+   return getRpcUrlForChain(chainId);
 }
 
 export interface ExecutionService {
