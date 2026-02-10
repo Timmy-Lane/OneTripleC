@@ -3,33 +3,37 @@ import { TelegramClient } from '../adapters/telegram/telegram-client.js';
 import type { AuthService } from '../domain/auth/auth-service.js';
 import type { WalletService } from '../domain/wallet/wallet-service.js';
 import { getViemClient } from '../adapters/blockchain/viem-client.js';
-import { config } from '../shared/config/index.js';
-import { formatEther, parseUnits, type Address } from 'viem';
+import { formatEther, formatUnits, parseUnits, type Address } from 'viem';
 import { intentService } from '../domain/intents/intent-service.js';
 import { findQuotesByIntentId } from '../persistence/repositories/quote-repository.js';
 import { findExecutionById } from '../persistence/repositories/execution-repository.js';
-import { getExplorerUrl } from '../shared/utils/chain-rpc.js';
+import { getExplorerUrl, getRpcUrlForChain } from '../shared/utils/chain-rpc.js';
+import { getTokenInfo } from '../adapters/tokens/token-info.js';
+import { getNativePriceUsd } from '../adapters/coingecko/index.js';
+import { findActiveChains } from '../persistence/repositories/chain-repository.js';
+import { findTokensByChainId } from '../persistence/repositories/token-repository.js';
 
 // Swap conversation state
 interface SwapState {
-   step: 'chain' | 'sourceToken' | 'amount' | 'targetToken' | 'confirm' | 'pending' | 'done';
+   step:
+      | 'chain'
+      | 'sourceToken'
+      | 'amount'
+      | 'targetToken'
+      | 'confirm'
+      | 'pending'
+      | 'done';
    chainId?: number;
    sourceToken?: string;
    targetToken?: string;
-   amount?: string;
+   amount?: string; // wei amount
+   displayAmount?: string; // human-readable amount entered by user
    intentId?: string;
    userId?: string;
 }
 
 // Store conversation state per user
 const swapStates = new Map<number, SwapState>();
-
-// Supported chains for V1
-const SUPPORTED_CHAINS = [
-   { id: 1, name: 'Ethereum', symbol: 'ETH' },
-   { id: 8453, name: 'Base', symbol: 'ETH' },
-   { id: 42161, name: 'Arbitrum', symbol: 'ETH' },
-];
 
 export class BotService {
    private client: TelegramClient;
@@ -49,24 +53,41 @@ export class BotService {
       this.setupHandlers();
    }
 
-   private async showQuotes(ctx: any, telegramId: number, intentId: string): Promise<void> {
+   private async showQuotes(
+      ctx: any,
+      telegramId: number,
+      intentId: string
+   ): Promise<void> {
       try {
          const quotes = await findQuotesByIntentId(intentId);
 
          if (quotes.length === 0) {
-            await ctx.editMessageText(
-               '❌ No quotes available for this swap.',
-               {
-                  reply_markup: {
-                     inline_keyboard: [
-                        [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                        [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
-                     ],
-                  },
-               }
-            );
+            await ctx.editMessageText('No quotes available for this swap.', {
+               reply_markup: {
+                  inline_keyboard: [
+                     [{ text: '🔄 Try Again', callback_data: 'swap' }],
+                     [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                  ],
+               },
+            });
             swapStates.delete(telegramId);
             return;
+         }
+
+         const state = swapStates.get(telegramId);
+         const chainId = state?.chainId || 1;
+
+         // fetch target token info for human-readable output
+         let targetDecimals = 18;
+         let targetSymbol = 'tokens';
+         if (state?.targetToken) {
+            try {
+               const info = await getTokenInfo(chainId, state.targetToken);
+               targetDecimals = info.decimals;
+               targetSymbol = info.symbol;
+            } catch {
+               // fallback to defaults
+            }
          }
 
          // Build quote display
@@ -77,15 +98,45 @@ export class BotService {
             const quote = quotes[i];
             const route = quote.route as any;
             const provider = route?.provider || 'Unknown';
-            const output = quote.estimatedOutput || '0';
-            const fee = quote.totalFee || '0';
+
+            // convert output from wei to human-readable token amount
+            const outputWei = quote.estimatedOutput || '0';
+            const outputFormatted = formatUnits(BigInt(outputWei), targetDecimals);
+            const outputRounded = Number(outputFormatted).toFixed(1);
+
+            // convert fee to USD
+            let feeDisplay: string;
+            const feeUsd = route?.totalFeeUsd;
+            if (feeUsd) {
+               feeDisplay = `~$${feeUsd}`;
+            } else {
+               // fallback: convert fee wei to ETH then USD
+               const feeWei = quote.totalFee || '0';
+               try {
+                  const nativePrice = await getNativePriceUsd(chainId);
+                  if (nativePrice) {
+                     const feeEth = Number(formatEther(BigInt(feeWei)));
+                     const feeInUsd = (feeEth * nativePrice).toFixed(2);
+                     feeDisplay = `~$${feeInUsd}`;
+                  } else {
+                     const feeEth = Number(formatEther(BigInt(feeWei))).toFixed(6);
+                     feeDisplay = `${feeEth} ETH`;
+                  }
+               } catch {
+                  const feeEth = Number(formatEther(BigInt(feeWei))).toFixed(6);
+                  feeDisplay = `${feeEth} ETH`;
+               }
+            }
 
             message += `<b>${i + 1}. ${provider}</b>\n`;
-            message += `Output: ${output} wei\n`;
-            message += `Fee: ${fee} wei\n\n`;
+            message += `💰 Output: ${outputRounded} ${targetSymbol}\n`;
+            message += `⛽ Fee: ${feeDisplay}\n\n`;
 
             buttons.push([
-               { text: `Select ${provider}`, callback_data: `swap_accept_${quote.id}` },
+               {
+                  text: `✅ Select ${provider}`,
+                  callback_data: `swap_accept_${quote.id}`,
+               },
             ]);
          }
 
@@ -103,15 +154,125 @@ export class BotService {
       }
    }
 
-   private async getEthBalance(address: Address): Promise<string> {
+   private async getNativeBalance(address: Address, chainId: number = 1): Promise<string> {
       try {
-         const client = getViemClient(1, config.ETHEREUM_RPC_URL);
+         const rpcUrl = getRpcUrlForChain(chainId);
+         const client = getViemClient(chainId, rpcUrl);
          const balance = await client.getBalance({ address });
          return formatEther(balance);
       } catch (error) {
-         console.error('Error fetching ETH balance:', error);
+         console.error(`Error fetching balance for chain ${chainId}:`, error);
          return '0.00';
       }
+   }
+
+   // shared logic for creating intent and polling for quotes
+   private async createIntentAndFetchQuotes(
+      ctx: any,
+      telegramId: number,
+      state: SwapState,
+      replyMsg?: any
+   ): Promise<void> {
+      if (
+         !state.userId ||
+         !state.chainId ||
+         !state.sourceToken ||
+         !state.targetToken ||
+         !state.amount
+      ) {
+         await ctx.reply('Missing swap data. Please start again.');
+         return;
+      }
+
+      try {
+         if (replyMsg) {
+            await ctx.telegram.editMessageText(
+               replyMsg.chat.id,
+               replyMsg.message_id,
+               undefined,
+               '⏳ Fetching quotes...'
+            );
+         } else {
+            await ctx.editMessageText('⏳ Fetching quotes...');
+         }
+      } catch {
+         // ignore edit failures
+      }
+
+      const rawMessage = JSON.stringify({
+         action: 'swap',
+         chainId: state.chainId,
+         sourceToken: state.sourceToken,
+         targetToken: state.targetToken,
+         amount: state.amount,
+      });
+
+      const intent = await intentService.createIntent({
+         userId: state.userId,
+         rawMessage,
+      });
+
+      state.intentId = intent.id;
+      state.step = 'pending';
+      swapStates.set(telegramId, state);
+
+      // poll for quotes
+      let attempts = 0;
+      const maxAttempts = 30;
+      const useCtx = replyMsg
+         ? {
+              editMessageText: (text: string, opts?: any) =>
+                 ctx.telegram.editMessageText(
+                    replyMsg.chat.id,
+                    replyMsg.message_id,
+                    undefined,
+                    text,
+                    opts
+                 ),
+           }
+         : ctx;
+
+      const pollInterval = setInterval(async () => {
+         attempts++;
+         try {
+            const currentIntent = await intentService.getIntentById(intent.id);
+
+            if (currentIntent?.state === 'QUOTED') {
+               clearInterval(pollInterval);
+               await this.showQuotes(useCtx, telegramId, intent.id);
+            } else if (currentIntent?.state === 'FAILED') {
+               clearInterval(pollInterval);
+               await useCtx.editMessageText(
+                  `❌ Failed to get quotes: ${currentIntent.errorMessage || 'Unknown error'}`,
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '🔄 Try Again', callback_data: 'swap' }],
+                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                        ],
+                     },
+                  }
+               );
+               swapStates.delete(telegramId);
+            } else if (attempts >= maxAttempts) {
+               clearInterval(pollInterval);
+               await useCtx.editMessageText(
+                  '⏱️ Timeout waiting for quotes. Please try again.',
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '🔄 Try Again', callback_data: 'swap' }],
+                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                        ],
+                     },
+                  }
+               );
+               swapStates.delete(telegramId);
+            }
+         } catch (err) {
+            console.error('Error polling for quotes:', err);
+         }
+      }, 1000);
    }
 
    private async showMainMenu(
@@ -125,34 +286,54 @@ export class BotService {
          return;
       }
 
-      const ethBalance = await this.getEthBalance(wallet.address as Address);
+      // fetch supported chains from DB
+      const activeChains = await findActiveChains();
+      const chains = activeChains.length > 0
+         ? activeChains
+         : [{ id: 1, name: 'Ethereum', nativeToken: 'ETH' }]; // fallback
+
+      // fetch balances for active chains in parallel
+      const balancePromises = chains.map(async chain => {
+         const balance = await this.getNativeBalance(wallet.address as Address, chain.id);
+         return { chain, balance };
+      });
+      const balances = await Promise.all(balancePromises);
+
+      let balanceLines = '';
+      for (const { chain, balance } of balances) {
+         const balanceNum = Number(balance);
+         if (balanceNum > 0) {
+            balanceLines += `${chain.name}: ${Number(balance).toFixed(4)} ${chain.nativeToken}\n`;
+         }
+      }
+      if (!balanceLines) {
+         balanceLines = `${chains[0].nativeToken}: 0.00\n`;
+      }
 
       const message = `🏠 OneTripleC
 
-<b>Wallet:</b>
+<b>💳 Wallet:</b>
 <code>${wallet.address}</code>
 
-<b>Balance:</b>
-ETH - ${ethBalance}
-USDC - 0.00
-USDT - 0.00`;
+<b>💰 Balance:</b>
+${balanceLines.trim()}`;
 
       const keyboard = {
          parse_mode: 'HTML' as const,
          reply_markup: {
             inline_keyboard: [
                [
-                  { text: 'Swap', callback_data: 'swap' },
-                  { text: 'Bridge', callback_data: 'bridge' },
+                  { text: '🔄 Swap', callback_data: 'swap' },
+                  { text: '🌉 Bridge', callback_data: 'bridge' },
                ],
-               [{ text: 'Cross-Chain', callback_data: 'cross_chain' }],
+               [{ text: '🌐 Cross-Chain', callback_data: 'cross_chain' }],
                [
                   {
                      text: '💰 Refresh Balance',
                      callback_data: 'refresh_balance',
                   },
                ],
-               [{ text: '⚙️ Wallet', callback_data: 'wallet' }],
+               [{ text: '👛 Wallet', callback_data: 'wallet' }],
             ],
          },
       };
@@ -195,27 +376,27 @@ USDT - 0.00`;
                   wallet.id
                );
 
-               const message = `Welcome to OneTripleC
+               const message = `🎉 Welcome to OneTripleC!
 
 I help you swap tokens across chains with ONE confirmation.
 
-Your wallet has been created.
+✅ Your wallet has been created.
 
-<b>Address:</b>
+<b>📍 Address:</b>
 <code>${wallet.address}</code>
 
-<b>Private Key:</b>
+<b>🔑 Private Key:</b>
 <code>${privateKey}</code>
 
-<b>IMPORTANT:</b> Save your private key securely. This is the only time it will be shown.`;
+⚠️ <b>IMPORTANT:</b> Save your private key securely. This is the only time it will be shown.`;
 
                await ctx.reply(message, {
                   parse_mode: 'HTML',
                   reply_markup: {
                      inline_keyboard: [
-                        [{ text: '▶ Start', callback_data: 'start' }],
-                        [{ text: 'Settings', callback_data: 'settings' }],
-                        [{ text: 'Help', callback_data: 'help' }],
+                        [{ text: '▶️ Start', callback_data: 'start' }],
+                        [{ text: '⚙️ Settings', callback_data: 'settings' }],
+                        [{ text: '❓ Help', callback_data: 'help' }],
                      ],
                   },
                });
@@ -257,22 +438,22 @@ Your wallet has been created.
       // Handle Settings button
       this.bot.action('settings', async ctx => {
          await ctx.answerCbQuery();
-         await ctx.reply('Settings functionality coming soon!');
+         await ctx.reply('⚙️ Settings functionality coming soon!');
       });
 
       // Handle Help button
       this.bot.action('help', async ctx => {
          await ctx.answerCbQuery();
-         const helpMessage = `How to use OneTripleC:
+         const helpMessage = `❓ <b>How to use OneTripleC:</b>
 
-1. Use the menu buttons to initiate swaps, bridges, or cross-chain transactions
+1️⃣ Use the menu buttons to initiate swaps, bridges, or cross-chain transactions
 
-2. I'll find the best route and show you options
+2️⃣ I'll find the best route and show you options
 
-3. Confirm the transaction
+3️⃣ Confirm the transaction
 
-4. Done! I'll notify you when complete.`;
-         await ctx.reply(helpMessage);
+4️⃣ Done! I'll notify you when complete.`;
+         await ctx.reply(helpMessage, { parse_mode: 'HTML' });
       });
 
       // Main menu button handlers
@@ -295,13 +476,17 @@ Your wallet has been created.
                },
             });
 
-            // Initialize swap state
             swapStates.set(telegramId, {
                step: 'chain',
                userId: user.id,
             });
 
-            // Show chain selection
+            // load chains from DB
+            const activeChains = await findActiveChains();
+            const chains = activeChains.length > 0
+               ? activeChains
+               : [{ id: 1, name: 'Ethereum', nativeToken: 'ETH' }];
+
             await ctx.editMessageText(
                `🔄 <b>Swap Tokens</b>
 
@@ -310,8 +495,11 @@ Select the network for your swap:`,
                   parse_mode: 'HTML',
                   reply_markup: {
                      inline_keyboard: [
-                        ...SUPPORTED_CHAINS.map(chain => [
-                           { text: `${chain.name}`, callback_data: `swap_chain_${chain.id}` },
+                        ...chains.map(chain => [
+                           {
+                              text: `🔗 ${chain.name}`,
+                              callback_data: `swap_chain_${chain.id}`,
+                           },
                         ]),
                         [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
                      ],
@@ -332,7 +520,10 @@ Select the network for your swap:`,
             if (!telegramId) return;
 
             const chainId = parseInt(ctx.match[1]);
-            const chain = SUPPORTED_CHAINS.find(c => c.id === chainId);
+
+            // load chain info from DB
+            const activeChains = await findActiveChains();
+            const chain = activeChains.find(c => c.id === chainId);
             if (!chain) {
                await ctx.reply('Invalid chain selected');
                return;
@@ -348,18 +539,29 @@ Select the network for your swap:`,
             state.step = 'sourceToken';
             swapStates.set(telegramId, state);
 
+            // load tokens from DB
+            const dbTokens = await findTokensByChainId(chainId);
+            const tokenButtons = dbTokens.map(t => ({
+               text: t.symbol,
+               callback_data: `swap_source_${t.address}`,
+            }));
+            // arrange in rows of 3
+            const tokenRows: { text: string; callback_data: string }[][] = [];
+            for (let i = 0; i < tokenButtons.length; i += 3) {
+               tokenRows.push(tokenButtons.slice(i, i + 3));
+            }
+
             await ctx.editMessageText(
                `🔄 <b>Swap on ${chain.name}</b>
 
-Enter the <b>source token</b> address (the token you want to sell):
+Select the <b>source token</b> (the token you want to sell):
 
-Example: <code>0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48</code> (USDC)
-
-Or use ETH address: <code>0x0000000000000000000000000000000000000000</code>`,
+💡 Or paste a token contract address`,
                {
                   parse_mode: 'HTML',
                   reply_markup: {
                      inline_keyboard: [
+                        ...tokenRows,
                         [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
                      ],
                   },
@@ -370,6 +572,61 @@ Or use ETH address: <code>0x0000000000000000000000000000000000000000</code>`,
          }
       });
 
+      // Handle source token quick-select
+      this.bot.action(/^swap_source_(0x[a-fA-F0-9]{40})$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const state = swapStates.get(telegramId);
+            if (!state || state.step !== 'sourceToken') return;
+
+            state.sourceToken = ctx.match[1];
+            state.step = 'amount';
+            swapStates.set(telegramId, state);
+
+            await ctx.editMessageText(
+               `✅ Source token set
+
+Now enter the <b>amount</b> to swap:
+
+💡 Example: <code>1.5</code>`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in source token selection:', error);
+         }
+      });
+
+      // Handle target token quick-select
+      this.bot.action(/^swap_target_(0x[a-fA-F0-9]{40})$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const state = swapStates.get(telegramId);
+            if (!state || state.step !== 'targetToken') return;
+
+            state.targetToken = ctx.match[1];
+            state.step = 'pending';
+            swapStates.set(telegramId, state);
+
+            // skip confirmation, go straight to quotes
+            await this.createIntentAndFetchQuotes(ctx, telegramId, state);
+         } catch (error) {
+            console.error('Error in target token selection:', error);
+         }
+      });
+
       // Handle text input for swap flow
       this.bot.on('text', async ctx => {
          try {
@@ -377,14 +634,16 @@ Or use ETH address: <code>0x0000000000000000000000000000000000000000</code>`,
             if (!telegramId) return;
 
             const state = swapStates.get(telegramId);
-            if (!state) return; // No active swap flow
+            if (!state) return; // no active swap flow
 
             const text = ctx.message.text.trim();
 
             if (state.step === 'sourceToken') {
                // Validate token address
                if (!/^0x[a-fA-F0-9]{40}$/.test(text)) {
-                  await ctx.reply('Invalid token address. Please enter a valid Ethereum address starting with 0x');
+                  await ctx.reply(
+                     '⚠️ Invalid token address. Please enter a valid Ethereum address starting with 0x'
+                  );
                   return;
                }
 
@@ -397,7 +656,7 @@ Or use ETH address: <code>0x0000000000000000000000000000000000000000</code>`,
 
 Now enter the <b>amount</b> to swap:
 
-Example: <code>1.5</code> (in token units, not wei)`,
+💡 Example: <code>1.5</code>`,
                   {
                      parse_mode: 'HTML',
                      reply_markup: {
@@ -411,25 +670,55 @@ Example: <code>1.5</code> (in token units, not wei)`,
                // Validate amount
                const amount = parseFloat(text);
                if (isNaN(amount) || amount <= 0) {
-                  await ctx.reply('Invalid amount. Please enter a positive number.');
+                  await ctx.reply(
+                     '⚠️ Invalid amount. Please enter a positive number.'
+                  );
                   return;
                }
 
-               // Store amount in wei (18 decimals by default)
-               state.amount = parseUnits(text, 18).toString();
+               // get source token decimals for proper conversion
+               let decimals = 18;
+               if (state.sourceToken) {
+                  try {
+                     const info = await getTokenInfo(state.chainId || 1, state.sourceToken);
+                     decimals = info.decimals;
+                  } catch {
+                     // fallback to 18
+                  }
+               }
+
+               state.displayAmount = text;
+               state.amount = parseUnits(text, decimals).toString();
                state.step = 'targetToken';
                swapStates.set(telegramId, state);
+
+               const chainId = state.chainId || 1;
+               // load tokens from DB
+               const dbTokens = await findTokensByChainId(chainId);
+               // filter out source token from target options
+               const targetTokens = dbTokens.filter(
+                  t => t.address.toLowerCase() !== state.sourceToken?.toLowerCase()
+               );
+               const tokenButtons = targetTokens.map(t => ({
+                  text: t.symbol,
+                  callback_data: `swap_target_${t.address}`,
+               }));
+               const tokenRows: { text: string; callback_data: string }[][] = [];
+               for (let i = 0; i < tokenButtons.length; i += 3) {
+                  tokenRows.push(tokenButtons.slice(i, i + 3));
+               }
 
                await ctx.reply(
                   `✅ Amount set: ${text}
 
-Now enter the <b>target token</b> address (the token you want to buy):
+Select the <b>target token</b> (the token you want to buy):
 
-Example: <code>0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2</code> (WETH)`,
+💡 Or paste a token contract address`,
                   {
                      parse_mode: 'HTML',
                      reply_markup: {
                         inline_keyboard: [
+                           ...tokenRows,
                            [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
                         ],
                      },
@@ -438,42 +727,26 @@ Example: <code>0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2</code> (WETH)`,
             } else if (state.step === 'targetToken') {
                // Validate token address
                if (!/^0x[a-fA-F0-9]{40}$/.test(text)) {
-                  await ctx.reply('Invalid token address. Please enter a valid Ethereum address starting with 0x');
+                  await ctx.reply(
+                     '⚠️ Invalid token address. Please enter a valid Ethereum address starting with 0x'
+                  );
                   return;
                }
 
                state.targetToken = text;
-               state.step = 'confirm';
+               state.step = 'pending';
                swapStates.set(telegramId, state);
 
-               const chain = SUPPORTED_CHAINS.find(c => c.id === state.chainId);
-
-               await ctx.reply(
-                  `📋 <b>Swap Summary</b>
-
-<b>Network:</b> ${chain?.name || 'Unknown'}
-<b>From:</b> <code>${state.sourceToken}</code>
-<b>Amount:</b> ${state.amount} wei
-<b>To:</b> <code>${state.targetToken}</code>
-
-Ready to get quotes?`,
-                  {
-                     parse_mode: 'HTML',
-                     reply_markup: {
-                        inline_keyboard: [
-                           [{ text: '✅ Get Quotes', callback_data: 'swap_get_quotes' }],
-                           [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
-                        ],
-                     },
-                  }
-               );
+               // skip confirmation, go straight to quotes
+               const loadingMsg = await ctx.reply('⏳ Fetching quotes...');
+               await this.createIntentAndFetchQuotes(ctx, telegramId, state, loadingMsg);
             }
          } catch (error) {
             console.error('Error handling text input:', error);
          }
       });
 
-      // Handle get quotes action
+      // Handle get quotes action (legacy, kept for any remaining references)
       this.bot.action('swap_get_quotes', async ctx => {
          try {
             await ctx.answerCbQuery();
@@ -481,80 +754,14 @@ Ready to get quotes?`,
             if (!telegramId) return;
 
             const state = swapStates.get(telegramId);
-            if (!state || state.step !== 'confirm') {
+            if (!state) {
                await ctx.reply('Session expired. Please start again.');
                return;
             }
 
-            if (!state.userId || !state.chainId || !state.sourceToken || !state.targetToken || !state.amount) {
-               await ctx.reply('Missing swap data. Please start again.');
-               return;
-            }
-
-            await ctx.editMessageText('🔄 Creating intent and fetching quotes...');
-
-            // Create intent with structured JSON
-            const rawMessage = JSON.stringify({
-               action: 'swap',
-               chainId: state.chainId,
-               sourceToken: state.sourceToken,
-               targetToken: state.targetToken,
-               amount: state.amount,
-            });
-
-            const intent = await intentService.createIntent({
-               userId: state.userId,
-               rawMessage,
-            });
-
-            state.intentId = intent.id;
             state.step = 'pending';
             swapStates.set(telegramId, state);
-
-            // Poll for quotes
-            let attempts = 0;
-            const maxAttempts = 30; // 30 seconds max
-            const pollInterval = setInterval(async () => {
-               attempts++;
-               try {
-                  const currentIntent = await intentService.getIntentById(intent.id);
-
-                  if (currentIntent?.state === 'QUOTED') {
-                     clearInterval(pollInterval);
-                     await this.showQuotes(ctx, telegramId, intent.id);
-                  } else if (currentIntent?.state === 'FAILED') {
-                     clearInterval(pollInterval);
-                     await ctx.editMessageText(
-                        `❌ Failed to get quotes: ${currentIntent.errorMessage || 'Unknown error'}`,
-                        {
-                           reply_markup: {
-                              inline_keyboard: [
-                                 [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                                 [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
-                              ],
-                           },
-                        }
-                     );
-                     swapStates.delete(telegramId);
-                  } else if (attempts >= maxAttempts) {
-                     clearInterval(pollInterval);
-                     await ctx.editMessageText(
-                        '⏱️ Timeout waiting for quotes. Please try again.',
-                        {
-                           reply_markup: {
-                              inline_keyboard: [
-                                 [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                                 [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
-                              ],
-                           },
-                        }
-                     );
-                     swapStates.delete(telegramId);
-                  }
-               } catch (err) {
-                  console.error('Error polling for quotes:', err);
-               }
-            }, 1000);
+            await this.createIntentAndFetchQuotes(ctx, telegramId, state);
          } catch (error) {
             console.error('Error getting quotes:', error);
             await ctx.reply('An error occurred. Please try again.');
@@ -579,7 +786,10 @@ Ready to get quotes?`,
             await ctx.editMessageText('🔄 Executing swap...');
 
             try {
-               const result = await intentService.acceptIntent(state.intentId, quoteId);
+               const result = await intentService.acceptIntent(
+                  state.intentId,
+                  quoteId
+               );
 
                // Poll for execution status
                let attempts = 0;
@@ -587,12 +797,18 @@ Ready to get quotes?`,
                const pollInterval = setInterval(async () => {
                   attempts++;
                   try {
-                     const execution = await findExecutionById(result.executionId);
+                     const execution = await findExecutionById(
+                        result.executionId
+                     );
 
                      if (execution?.state === 'CONFIRMED') {
                         clearInterval(pollInterval);
-                        const explorerUrl = await getExplorerUrl(state.chainId!);
-                        const txLink = explorerUrl ? `${explorerUrl}/tx/${execution.txHash}` : '';
+                        const explorerUrl = await getExplorerUrl(
+                           state.chainId!
+                        );
+                        const txLink = explorerUrl
+                           ? `${explorerUrl}/tx/${execution.txHash}`
+                           : '';
 
                         await ctx.editMessageText(
                            `✅ <b>Swap Complete!</b>
@@ -600,13 +816,23 @@ Ready to get quotes?`,
 Transaction hash:
 <code>${execution.txHash}</code>
 
-${txLink ? `<a href="${txLink}">View on Explorer</a>` : ''}`,
+${txLink ? `<a href="${txLink}">🔍 View on Explorer</a>` : ''}`,
                            {
                               parse_mode: 'HTML',
                               reply_markup: {
                                  inline_keyboard: [
-                                    [{ text: '🔄 New Swap', callback_data: 'swap' }],
-                                    [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                                    [
+                                       {
+                                          text: '🔄 New Swap',
+                                          callback_data: 'swap',
+                                       },
+                                    ],
+                                    [
+                                       {
+                                          text: '🏠 Main Menu',
+                                          callback_data: 'back_to_main',
+                                       },
+                                    ],
                                  ],
                               },
                            }
@@ -622,8 +848,18 @@ Error: ${execution.errorMessage || 'Unknown error'}`,
                               parse_mode: 'HTML',
                               reply_markup: {
                                  inline_keyboard: [
-                                    [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                                    [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                                    [
+                                       {
+                                          text: '🔄 Try Again',
+                                          callback_data: 'swap',
+                                       },
+                                    ],
+                                    [
+                                       {
+                                          text: '🏠 Main Menu',
+                                          callback_data: 'back_to_main',
+                                       },
+                                    ],
                                  ],
                               },
                            }
@@ -641,7 +877,12 @@ Check your wallet for status.`,
                               parse_mode: 'HTML',
                               reply_markup: {
                                  inline_keyboard: [
-                                    [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                                    [
+                                       {
+                                          text: '🏠 Main Menu',
+                                          callback_data: 'back_to_main',
+                                       },
+                                    ],
                                  ],
                               },
                            }
@@ -659,7 +900,12 @@ Check your wallet for status.`,
                      reply_markup: {
                         inline_keyboard: [
                            [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                           [
+                              {
+                                 text: '🏠 Main Menu',
+                                 callback_data: 'back_to_main',
+                              },
+                           ],
                         ],
                      },
                   }
@@ -673,12 +919,12 @@ Check your wallet for status.`,
 
       this.bot.action('bridge', async ctx => {
          await ctx.answerCbQuery();
-         await ctx.reply('Bridge functionality coming soon!');
+         await ctx.reply('🌉 Bridge functionality coming soon!');
       });
 
       this.bot.action('cross_chain', async ctx => {
          await ctx.answerCbQuery();
-         await ctx.reply('Cross-chain functionality coming soon!');
+         await ctx.reply('🌐 Cross-chain functionality coming soon!');
       });
 
       this.bot.action('refresh_balance', async ctx => {
@@ -705,9 +951,9 @@ Check your wallet for status.`,
          }
       });
 
+      // Wallet management
       this.bot.action('wallet', async ctx => {
          try {
-            // Answer callback query FIRST to prevent timeout
             await ctx.answerCbQuery();
 
             const telegramId = ctx.from?.id;
@@ -725,76 +971,119 @@ Check your wallet for status.`,
                },
             });
 
-            const wallet = await this.walletService.getWalletByUserId(user.id);
-            if (!wallet) {
-               await ctx.reply('Error: Wallet not found');
+            const allWallets = await this.walletService.getAllWalletsByUserId(user.id);
+            if (allWallets.length === 0) {
+               await ctx.editMessageText('No wallets found. Creating one...', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               });
                return;
             }
 
-            const message = `👛 Wallet
+            let message = '👛 <b>Wallet list:</b>\n\n';
+            const buttons: { text: string; callback_data: string }[][] = [];
 
-<b>Wallet List:</b>
-Active Wallet
+            for (let i = 0; i < allWallets.length; i++) {
+               const w = allWallets[i];
+               const activeLabel = w.isActive ? ' ✅' : '';
+               message += `${i + 1}. <code>${w.address}</code>${activeLabel}\n`;
+            }
 
-<b>Address:</b>
-<code>${wallet.address}</code>
+            message += '\n<i>✅ = active wallet</i>';
 
-<b>Network:</b>
-Ethereum`;
-
-            const keyboard = {
-               parse_mode: 'HTML' as const,
-               reply_markup: {
-                  inline_keyboard: [
-                     [{ text: 'Add Wallet', callback_data: 'add_wallet' }],
-                     [
-                        {
-                           text: 'Show Private Key',
-                           callback_data: 'show_private_key',
-                        },
-                     ],
-                     [
-                        {
-                           text: 'Change Active Wallet',
-                           callback_data: 'change_active_wallet',
-                        },
-                     ],
-                     [
-                        {
-                           text: 'Delete Wallet',
-                           callback_data: 'delete_wallet',
-                        },
-                     ],
-                     [
-                        {
-                           text: 'Change Network',
-                           callback_data: 'change_network',
-                        },
-                     ],
-                     [{ text: 'Back', callback_data: 'back_to_main' }],
-                  ],
-               },
-            };
+            // wallet action buttons
+            buttons.push([
+               { text: '🔑 Show Private Key', callback_data: 'show_private_key' },
+            ]);
+            buttons.push([
+               { text: '➕ Add Wallet', callback_data: 'add_wallet' },
+            ]);
+            if (allWallets.length > 1) {
+               buttons.push([
+                  { text: '🔀 Change Active Wallet', callback_data: 'change_active_wallet' },
+               ]);
+               buttons.push([
+                  { text: '🗑️ Delete Wallet', callback_data: 'delete_wallet' },
+               ]);
+            }
+            buttons.push([{ text: '🏠 Back', callback_data: 'back_to_main' }]);
 
             if (ctx.callbackQuery?.message) {
-               await ctx.editMessageText(message, keyboard);
+               await ctx.editMessageText(message, {
+                  parse_mode: 'HTML',
+                  reply_markup: { inline_keyboard: buttons },
+               });
             } else {
-               await ctx.reply(message, keyboard);
+               await ctx.reply(message, {
+                  parse_mode: 'HTML',
+                  reply_markup: { inline_keyboard: buttons },
+               });
             }
          } catch (error) {
             console.error('Error in wallet handler:', error);
          }
       });
 
-      // Handle wallet action button handlers
+      // Add new wallet
       this.bot.action('add_wallet', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('Add wallet functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            const newWallet = await this.walletService.generateWalletForUser(user.id);
+            const privateKey = await this.walletService.getPrivateKey(newWallet.id);
+
+            await ctx.editMessageText(
+               `✅ <b>New wallet created!</b>
+
+<b>📍 Address:</b>
+<code>${newWallet.address}</code>
+
+<b>🔑 Private Key:</b>
+<code>${privateKey}</code>
+
+⚠️ Save your private key securely. This is the only time it will be shown.`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                        [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error: any) {
+            console.error('Error adding wallet:', error);
+            await ctx.editMessageText(
+               `❌ Error creating wallet: ${error.message || 'Unknown error'}`,
+               {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                     ],
+                  },
+               }
+            );
+         }
       });
 
+      // Show private key of active wallet
       this.bot.action('show_private_key', async ctx => {
          try {
-            // Answer callback query FIRST to prevent timeout
             await ctx.answerCbQuery();
 
             const telegramId = ctx.from?.id;
@@ -823,33 +1112,244 @@ Ethereum`;
             );
 
             await ctx.reply(
-               `⚠️ SECURITY WARNING ⚠️
+               `⚠️ <b>SECURITY WARNING</b> ⚠️
 
-Your Private Key:
+🔑 Your Private Key:
 <code>${privateKey}</code>
 
-NEVER share this with anyone!
+🚨 NEVER share this with anyone!
 Anyone with this key has full access to your wallet.`,
-               { parse_mode: 'HTML' }
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                     ],
+                  },
+               }
             );
          } catch (error) {
             console.error('Error in show_private_key handler:', error);
          }
       });
 
+      // Change active wallet - show wallet selection
       this.bot.action('change_active_wallet', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('Change active wallet functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            const allWallets = await this.walletService.getAllWalletsByUserId(user.id);
+            if (allWallets.length <= 1) {
+               await ctx.editMessageText('You only have one wallet.', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                     ],
+                  },
+               });
+               return;
+            }
+
+            let message = '🔀 <b>Select active wallet:</b>\n\n';
+            const buttons: { text: string; callback_data: string }[][] = [];
+
+            for (let i = 0; i < allWallets.length; i++) {
+               const w = allWallets[i];
+               const activeLabel = w.isActive ? ' ✅' : '';
+               const shortAddr = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+               message += `${i + 1}. <code>${w.address}</code>${activeLabel}\n`;
+               if (!w.isActive) {
+                  buttons.push([
+                     {
+                        text: `Set ${shortAddr} active`,
+                        callback_data: `set_active_${w.id}`,
+                     },
+                  ]);
+               }
+            }
+
+            buttons.push([{ text: '👛 Back to Wallets', callback_data: 'wallet' }]);
+
+            await ctx.editMessageText(message, {
+               parse_mode: 'HTML',
+               reply_markup: { inline_keyboard: buttons },
+            });
+         } catch (error) {
+            console.error('Error in change_active_wallet handler:', error);
+         }
       });
 
+      // Set a specific wallet as active
+      this.bot.action(/^set_active_(\S+)$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const walletId = ctx.match[1];
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            await this.walletService.setActiveWallet(walletId, user.id);
+
+            await ctx.editMessageText('✅ Active wallet changed!', {
+               reply_markup: {
+                  inline_keyboard: [
+                     [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                     [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                  ],
+               },
+            });
+         } catch (error) {
+            console.error('Error setting active wallet:', error);
+         }
+      });
+
+      // Delete wallet - show wallet selection
       this.bot.action('delete_wallet', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('Delete wallet functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            const allWallets = await this.walletService.getAllWalletsByUserId(user.id);
+            if (allWallets.length <= 1) {
+               await ctx.editMessageText('⚠️ Cannot delete the only wallet.', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                     ],
+                  },
+               });
+               return;
+            }
+
+            let message = '🗑️ <b>Select wallet to delete:</b>\n\n';
+            const buttons: { text: string; callback_data: string }[][] = [];
+
+            for (let i = 0; i < allWallets.length; i++) {
+               const w = allWallets[i];
+               const activeLabel = w.isActive ? ' ✅' : '';
+               const shortAddr = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+               message += `${i + 1}. <code>${w.address}</code>${activeLabel}\n`;
+               buttons.push([
+                  {
+                     text: `🗑️ Delete ${shortAddr}`,
+                     callback_data: `confirm_delete_${w.id}`,
+                  },
+               ]);
+            }
+
+            buttons.push([{ text: '👛 Back to Wallets', callback_data: 'wallet' }]);
+
+            await ctx.editMessageText(message, {
+               parse_mode: 'HTML',
+               reply_markup: { inline_keyboard: buttons },
+            });
+         } catch (error) {
+            console.error('Error in delete_wallet handler:', error);
+         }
       });
 
-      this.bot.action('change_network', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('Change network functionality coming soon!');
+      // Confirm wallet deletion
+      this.bot.action(/^confirm_delete_(\S+)$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const walletId = ctx.match[1];
+
+            await ctx.editMessageText(
+               '⚠️ <b>Are you sure?</b>\n\nThis will permanently delete the wallet and its private key.',
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        [
+                           {
+                              text: '✅ Yes, delete',
+                              callback_data: `do_delete_${walletId}`,
+                           },
+                           {
+                              text: '❌ Cancel',
+                              callback_data: 'wallet',
+                           },
+                        ],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in confirm_delete handler:', error);
+         }
+      });
+
+      // Actually delete wallet
+      this.bot.action(/^do_delete_(\S+)$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const walletId = ctx.match[1];
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            try {
+               await this.walletService.deleteWallet(walletId, user.id);
+               await ctx.editMessageText('✅ Wallet deleted.', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                        [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               });
+            } catch (error: any) {
+               await ctx.editMessageText(
+                  `❌ ${error.message || 'Error deleting wallet'}`,
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                        ],
+                     },
+                  }
+               );
+            }
+         } catch (error) {
+            console.error('Error deleting wallet:', error);
+         }
       });
 
       this.bot.action('back_to_main', async ctx => {
