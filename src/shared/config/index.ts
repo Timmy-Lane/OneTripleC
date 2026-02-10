@@ -36,6 +36,7 @@ const envSchema = z.object({
 
   // External APIs
   TELEGRAM_BOT_TOKEN: z.string().optional(),
+  COINGECKO_API_KEY: z.string().optional(),
   
   // Contract Addresses
   ETHEREUM_SMART_ACCOUNT_FACTORY: z.string().optional(),
