@@ -7,7 +7,7 @@ import { formatEther, formatUnits, parseUnits, type Address } from 'viem';
 import { intentService } from '../domain/intents/intent-service.js';
 import { findQuotesByIntentId } from '../persistence/repositories/quote-repository.js';
 import { findExecutionById } from '../persistence/repositories/execution-repository.js';
-import { getExplorerUrl, getRpcUrlForChain } from '../shared/utils/chain-rpc.js';
+import { getExplorerUrl, getRpcUrlForChain, hasRpcConfigured } from '../shared/utils/chain-rpc.js';
 import { getTokenInfo } from '../adapters/tokens/token-info.js';
 import { getNativePriceUsd } from '../adapters/coingecko/index.js';
 import { findActiveChains } from '../persistence/repositories/chain-repository.js';
@@ -286,11 +286,12 @@ export class BotService {
          return;
       }
 
-      // fetch supported chains from DB
+      // fetch supported chains from DB, filtered to those with RPC configured
       const activeChains = await findActiveChains();
-      const chains = activeChains.length > 0
-         ? activeChains
-         : [{ id: 1, name: 'Ethereum', nativeToken: 'ETH' }]; // fallback
+      const chains = activeChains.filter(c => hasRpcConfigured(c.id));
+      if (chains.length === 0) {
+         chains.push({ id: 1, name: 'Ethereum', nativeToken: 'ETH' } as any);
+      }
 
       // fetch balances for active chains in parallel
       const balancePromises = chains.map(async chain => {
@@ -481,11 +482,12 @@ I help you swap tokens across chains with ONE confirmation.
                userId: user.id,
             });
 
-            // load chains from DB
+            // load chains from DB, filtered to those with RPC configured
             const activeChains = await findActiveChains();
-            const chains = activeChains.length > 0
-               ? activeChains
-               : [{ id: 1, name: 'Ethereum', nativeToken: 'ETH' }];
+            const chains = activeChains.filter(c => hasRpcConfigured(c.id));
+            if (chains.length === 0) {
+               chains.push({ id: 1, name: 'Ethereum', nativeToken: 'ETH' } as any);
+            }
 
             await ctx.editMessageText(
                `🔄 <b>Swap Tokens</b>
