@@ -3,7 +3,7 @@ import { users } from '../models/schema.js';
 import { eq, and } from 'drizzle-orm';
 
 export interface CreateUserInput {
-  telegramId: number;
+  telegramId?: number;
   telegramUsername?: string;
   telegramFirstName?: string;
   authProvider?: string;
@@ -14,11 +14,11 @@ export async function createUser(input: CreateUserInput) {
   const [user] = await db
     .insert(users)
     .values({
-      telegramId: input.telegramId,
+      telegramId: input.telegramId ?? undefined,
       telegramUsername: input.telegramUsername,
       telegramFirstName: input.telegramFirstName,
       authProvider: input.authProvider || 'telegram',
-      authProviderId: input.authProviderId || input.telegramId.toString(),
+      authProviderId: input.authProviderId || input.telegramId?.toString() || '',
     })
     .returning();
 
@@ -36,10 +36,11 @@ export async function findUserByTelegramId(telegramId: number) {
 }
 
 export async function findOrCreateUser(input: CreateUserInput) {
-  const existingUser = await findUserByTelegramId(input.telegramId);
-
-  if (existingUser) {
-    return existingUser;
+  if (input.telegramId !== undefined) {
+    const existingUser = await findUserByTelegramId(input.telegramId);
+    if (existingUser) {
+      return existingUser;
+    }
   }
 
   return createUser(input);

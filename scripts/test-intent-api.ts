@@ -17,10 +17,7 @@ async function getOrCreateTestUser() {
     telegramId: Math.floor(Math.random() * 1000000000),
     telegramUsername: 'testuser',
     telegramFirstName: 'Test',
-    telegramLastName: 'User',
-    isActive: true,
-    isBlocked: false,
-    preferences: {},
+    authProviderId: Math.floor(Math.random() * 1000000000).toString(),
   }).returning();
 
   console.log('✅ Created new test user:');

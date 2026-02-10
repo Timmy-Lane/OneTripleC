@@ -56,10 +56,8 @@ export function createAuthService(walletService: WalletService): AuthService {
         authProviderId: input.providerId,
       };
     } else {
-      // For other providers, we'll need to add proper fields later
-      // For now, just use dummy telegram data
       userInput = {
-        telegramId: 0, // TODO: Make telegramId nullable
+        telegramId: undefined,
         telegramUsername: undefined,
         telegramFirstName: undefined,
         authProvider: input.provider,

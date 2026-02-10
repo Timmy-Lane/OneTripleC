@@ -38,7 +38,7 @@ export const users = pgTable(
   'users',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    telegramId: bigint('telegram_id', { mode: 'number' }).notNull().unique(),
+    telegramId: bigint('telegram_id', { mode: 'number' }).unique(),
     telegramUsername: varchar('telegram_username', { length: 255 }),
     telegramFirstName: varchar('telegram_first_name', { length: 255 }),
     authProvider: varchar('auth_provider', { length: 50 }).notNull().default('telegram'),
@@ -62,13 +62,13 @@ export const wallets = pgTable(
     id: uuid('id').primaryKey().defaultRandom(),
     userId: uuid('user_id')
       .notNull()
-      .unique()
       .references(() => users.id, { onDelete: 'cascade' }),
     address: varchar('address', { length: 255 }).notNull().unique(),
     encryptedPrivateKey: text('encrypted_private_key').notNull(),
     encryptionKeyId: varchar('encryption_key_id', { length: 255 })
       .notNull()
       .default('master-key-v1'),
+    isActive: boolean('is_active').notNull().default(true),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .defaultNow(),
