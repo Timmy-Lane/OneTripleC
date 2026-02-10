@@ -23,7 +23,7 @@ import { getDeadline } from './utils/deadline.js';
 import { WETH } from '../tokens/weth.js';
 import { isPairedWithWeth, getOtherToken } from './utils/path-helpers.js';
 
-// OLD (INCORRECT): 'function quoteExactInput(bytes memory path, uint256 amountIn) external returns (uint256 amountOut, uint16[] memory fees)'
+// function quoteExactInput(bytes memory path, uint256 amountIn) external returns (uint256 amountOut, uint16[] memory fees)
 const QUOTER_ABI_EXACT_INPUT =
    'function quoteExactInput(bytes memory path, uint256 amountIn) external returns (uint256 amountOut, uint160[] memory sqrtPriceX96AfterList, uint32[] memory initializedTicksCrossedList, uint256 gasEstimate)';
 

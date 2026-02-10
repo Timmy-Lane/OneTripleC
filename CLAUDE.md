@@ -564,6 +564,12 @@ If the answer to ALL of these is "no", then justify the new table.
 - Constants: `SCREAMING_SNAKE_CASE` (e.g., `MAX_RETRIES`)
 - Database columns: `snake_case` (e.g., `source_chain_id`)
 
+### Comments
+
+- Always start with lowercase (e.g., `// fetch reserves from pool` not `// Fetch reserves from pool`)
+- Minimal commas -- only use commas when they add clarity or are grammatically required
+- Keep comments short and direct
+
 ### Routes
 
 - RESTful: `/intents`, `/intents/:id`, `/intents/:id/confirm`
@@ -610,6 +616,36 @@ If the answer to ALL of these is "no", then justify the new table.
 - Test Telegram → API → Worker → Blockchain flow
 - Use testnet RPCs
 - Mock Telegram webhook
+
+### Testing Priorities
+
+- Test HOFs and factory patterns first (high leverage but error-prone)
+- Test highest-risk code immediately: blockchain adapters, API clients, data ingest, execution service
+- Better to over-test than debug in production
+- Never trust changes work without verification -- run tests before assuming success
+
+## Development Best Practices
+
+### Verification First
+
+- Never assume changes work without verification
+- API changes require integration test runs
+- Blockchain adapter changes require testnet verification
+- "Verify, don't assume" is the default
+
+### Performance Patterns
+
+- Use `p-limit` for external API rate-limiting (DEX adapters, RPC calls, quote fetching)
+- Let PostgreSQL handle aggregations (CTEs + window functions over client-side loops)
+- DB-first for data processing: push computation to the database whenever possible
+- Minimize RPC calls: batch requests with multicall when available
+
+### Architecture Review
+
+- Use code review for architecture decisions before implementation
+- Critical review areas: architecture changes, test coverage, performance implications, edge cases
+- Refactor in review phase, not after shipping
+- Question over-engineering -- simplicity often wins
 
 ## Development Workflow
 
