@@ -3,6 +3,8 @@ import type { QuoteRoute, RouteStep } from '../../shared/types/quote.js';
 import { RouteStepType } from '../../shared/types/quote.js';
 import { UniswapV2Adapter } from '../../adapters/dex/uniswap-v2-adapter.js';
 import { UniswapV3Adapter } from '../../adapters/dex/uniswap-v3-adapter.js';
+import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
+import { getUniversalRouterAddress } from '../../adapters/dex/universal-router/constants.js';
 import type { DexAdapter, QuoteParams, SwapQuote as InternalSwapQuote } from '../../adapters/dex/types.js';
 import { Address, formatEther } from 'viem';
 import { WETH } from '../../adapters/tokens/weth.js';
@@ -10,6 +12,7 @@ import { getViemClient } from '../../adapters/blockchain/viem-client.js';
 import { getNativePriceUsd } from '../../adapters/coingecko/index.js';
 import { AcrossAdapter } from '../../adapters/bridge/across-adapter.js';
 import type { BridgeAdapter } from '../../adapters/bridge/types.js';
+import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
 
 interface Logger {
   info(obj: object, msg?: string): void;
@@ -43,32 +46,42 @@ export interface QuoteResult {
   totalFeeUsd?: string;
 }
 
-export interface QuoteServiceConfig {
-  chainId: number;
-  rpcUrl: string;
-}
-
 export class QuoteService {
-  private dexAdapters: Map<string, DexAdapter>;
+  private adaptersByChain: Map<number, Map<string, DexAdapter>>;
   private bridgeAdapter: BridgeAdapter;
-  private chainId: number;
-  private rpcUrl: string;
 
-  constructor(config: QuoteServiceConfig) {
-    this.chainId = config.chainId;
-    this.rpcUrl = config.rpcUrl;
-    this.dexAdapters = new Map();
+  constructor() {
+    this.adaptersByChain = new Map();
     this.bridgeAdapter = new AcrossAdapter();
+  }
 
-    this.dexAdapters.set('uniswap-v2', new UniswapV2Adapter({
-      chainId: config.chainId,
-      rpcUrl: config.rpcUrl,
+  private getAdaptersForChain(chainId: number): Map<string, DexAdapter> {
+    const cached = this.adaptersByChain.get(chainId);
+    if (cached) return cached;
+
+    const rpcUrl = getRpcUrlForChain(chainId);
+    const adapters = new Map<string, DexAdapter>();
+
+    adapters.set('uniswap-v2', new UniswapV2Adapter({
+      chainId,
+      rpcUrl,
     }));
 
-    this.dexAdapters.set('uniswap-v3', new UniswapV3Adapter({
-      chainId: config.chainId,
-      rpcUrl: config.rpcUrl,
+    adapters.set('uniswap-v3', new UniswapV3Adapter({
+      chainId,
+      rpcUrl,
     }));
+
+    // add universal router adapter if deployed on this chain
+    if (getUniversalRouterAddress(chainId)) {
+      adapters.set('universal-router', new UniversalRouterAdapter({
+        chainId,
+        rpcUrl,
+      }));
+    }
+
+    this.adaptersByChain.set(chainId, adapters);
+    return adapters;
   }
 
   async fetchQuotes(request: QuoteRequest): Promise<QuoteResult[]> {
@@ -92,10 +105,11 @@ export class QuoteService {
       return quotes;
     }
 
-    const adapters = ['uniswap-v2', 'uniswap-v3'];
-    const quotePromises = adapters.map(async (adapterName) => {
+    const chainAdapters = this.getAdaptersForChain(request.sourceChainId);
+    const adapterNames = [...chainAdapters.keys()];
+    const quotePromises = adapterNames.map(async (adapterName) => {
       try {
-        const adapter = this.dexAdapters.get(adapterName);
+        const adapter = chainAdapters.get(adapterName);
         if (!adapter) return null;
 
         const swapQuote = await adapter.getQuote(quoteParams);
@@ -158,7 +172,8 @@ export class QuoteService {
 
       const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
         bridgeQuote.estimatedGas.toString(),
-        '0'
+        '0',
+        request.sourceChainId
       );
 
       return [{
@@ -246,7 +261,8 @@ export class QuoteService {
 
     const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
       swapQuote.estimatedGas.toString(),
-      swapQuote.fee.toString()
+      swapQuote.fee.toString(),
+      request.sourceChainId
     );
 
     return {
@@ -273,11 +289,13 @@ export class QuoteService {
 
   private async calculateTotalFee(
     gasEstimate: string,
-    dexFee: string
+    dexFee: string,
+    chainId: number
   ): Promise<{ totalFee: string; totalFeeUsd?: string }> {
     let gasPrice: bigint;
     try {
-      const client = getViemClient(this.chainId, this.rpcUrl);
+      const rpcUrl = getRpcUrlForChain(chainId);
+      const client = getViemClient(chainId, rpcUrl);
       gasPrice = await client.getGasPrice();
     } catch {
       // fallback to 20 gwei if RPC call fails
@@ -291,7 +309,7 @@ export class QuoteService {
     // convert gas cost to USD
     let totalFeeUsd: string | undefined;
     try {
-      const nativePrice = await getNativePriceUsd(this.chainId);
+      const nativePrice = await getNativePriceUsd(chainId);
       if (nativePrice !== null) {
         const feeEth = Number(formatEther(total));
         const feeUsd = feeEth * nativePrice;
@@ -305,12 +323,9 @@ export class QuoteService {
   }
 }
 
-export function createQuoteService(config: QuoteServiceConfig): QuoteService {
-  return new QuoteService(config);
+export function createQuoteService(): QuoteService {
+  return new QuoteService();
 }
 
-// Default singleton instance for backwards compatibility
-export const quoteService = new QuoteService({
-  chainId: 1,
-  rpcUrl: process.env.ETHEREUM_RPC_URL || 'https://eth.llamarpc.com',
-});
+// singleton instance -- adapters are created per-chain on demand
+export const quoteService = new QuoteService();
