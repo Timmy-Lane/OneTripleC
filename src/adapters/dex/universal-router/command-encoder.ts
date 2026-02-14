@@ -4,6 +4,7 @@ import {
    FLAG_ALLOW_REVERT,
    UNIVERSAL_ROUTER_ABI,
 } from './constants.js';
+import type { Permit2PermitParams } from './types.js';
 
 // -- command byte encoding --
 
@@ -113,6 +114,51 @@ export function encodeSweep(params: {
          { name: 'amountMin', type: 'uint256' },
       ],
       [params.token, params.recipient, params.amountMin]
+   );
+}
+
+// -- permit2 encoding --
+
+export function encodePermit2Permit(
+   permit: Permit2PermitParams,
+   signature: Hex
+): Hex {
+   // PermitSingle struct: { PermitDetails details, address spender, uint256 sigDeadline }
+   // PermitDetails: { address token, uint160 amount, uint48 expiration, uint48 nonce }
+   const permitSingle = {
+      details: {
+         token: permit.token,
+         amount: permit.amount,
+         expiration: permit.expiration,
+         nonce: permit.nonce,
+      },
+      spender: permit.spender,
+      sigDeadline: permit.sigDeadline,
+   };
+
+   return encodeAbiParameters(
+      [
+         {
+            name: 'permitSingle',
+            type: 'tuple',
+            components: [
+               {
+                  name: 'details',
+                  type: 'tuple',
+                  components: [
+                     { name: 'token', type: 'address' },
+                     { name: 'amount', type: 'uint160' },
+                     { name: 'expiration', type: 'uint48' },
+                     { name: 'nonce', type: 'uint48' },
+                  ],
+               },
+               { name: 'spender', type: 'address' },
+               { name: 'sigDeadline', type: 'uint256' },
+            ],
+         },
+         { name: 'signature', type: 'bytes' },
+      ],
+      [permitSingle, signature]
    );
 }
 

@@ -33,6 +33,7 @@ export {
    encodeWrapEth,
    encodeUnwrapWeth,
    encodeSweep,
+   encodePermit2Permit,
    encodeExecute,
 } from './command-encoder.js';
 
@@ -41,3 +42,11 @@ export {
    encodeV3Path,
    decodeV3Path,
 } from './path-encoder.js';
+
+// Permit2 Signing
+export {
+   getPermit2Domain,
+   PERMIT_SINGLE_TYPES,
+   signPermit2,
+   getPermit2Nonce,
+} from './permit2-signer.js';

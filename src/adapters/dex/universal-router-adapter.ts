@@ -21,15 +21,19 @@ import { WETH } from '../tokens/weth.js';
 import { isPairedWithWeth } from './utils/path-helpers.js';
 import {
    getUniversalRouterAddress,
+   PERMIT2_ADDRESS,
    UR_COMMAND,
    UR_RECIPIENT_ROUTER,
-} from './universal-router/index.js';
-import {
+   UR_RECIPIENT_SENDER,
    encodeCommands,
    encodeV3SwapExactIn,
    encodeUnwrapWeth,
+   encodePermit2Permit,
    encodeExecute,
+   signPermit2,
+   getPermit2Nonce,
 } from './universal-router/index.js';
+import type { Permit2PermitParams } from './universal-router/types.js';
 
 const QUOTER_ABI_EXACT_INPUT =
    'function quoteExactInput(bytes memory path, uint256 amountIn) external returns (uint256 amountOut, uint160[] memory sqrtPriceX96AfterList, uint32[] memory initializedTicksCrossedList, uint256 gasEstimate)';
@@ -179,6 +183,113 @@ export class UniversalRouterAdapter implements DexAdapter {
          data,
          value: 0n,
       };
+   }
+
+   // -- execution with permit2 signature --
+   // the execution service calls this instead of buildSwapTransaction when
+   // it has the user's private key available and wants gasless permit flow
+
+   async buildSwapWithPermit(
+      quote: SwapQuote,
+      recipient: Address,
+      slippageBps: number,
+      signTypedData: (params: any) => Promise<Hex>
+   ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
+      const deadline = getDeadline(20);
+
+      const encodedPath = quote.path.encodedPath;
+      if (!encodedPath) {
+         throw new Error(
+            '[UniversalRouterAdapter] Missing encoded path in quote'
+         );
+      }
+
+      // fetch current nonce from Permit2 contract
+      const { nonce } = await getPermit2Nonce(
+         this.client.readContract.bind(this.client),
+         recipient,
+         quote.fromToken,
+         this.routerAddress
+      );
+
+      // build permit params
+      const sigDeadline = deadline;
+      const permit: Permit2PermitParams = {
+         token: quote.fromToken,
+         amount: quote.fromAmount,
+         expiration: Math.floor(Date.now() / 1000) + 86400, // 24h
+         nonce,
+         spender: this.routerAddress,
+         sigDeadline,
+      };
+
+      // sign the permit via the caller-provided signing function
+      const signature = await signPermit2(
+         signTypedData,
+         this.chainId,
+         permit
+      );
+
+      // check if output is WETH -- if so, unwrap to native ETH
+      const wethAddress = WETH.getAddress(this.chainId);
+      const outputIsWeth =
+         wethAddress &&
+         quote.toToken.toLowerCase() === wethAddress.toLowerCase();
+
+      const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
+      const inputs: Hex[] = [];
+
+      // command 1: PERMIT2_PERMIT
+      commandList.push({ id: UR_COMMAND.PERMIT2_PERMIT });
+      inputs.push(encodePermit2Permit(permit, signature));
+
+      // command 2: V3_SWAP_EXACT_IN
+      commandList.push({ id: UR_COMMAND.V3_SWAP_EXACT_IN });
+      inputs.push(
+         encodeV3SwapExactIn({
+            recipient: outputIsWeth
+               ? UR_RECIPIENT_ROUTER
+               : recipient,
+            amountIn: quote.fromAmount,
+            amountOutMin: minAmountOut,
+            path: encodedPath,
+            payerIsUser: true,
+         })
+      );
+
+      // command 3 (optional): UNWRAP_WETH if output is native ETH
+      if (outputIsWeth) {
+         commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
+         inputs.push(
+            encodeUnwrapWeth({
+               recipient,
+               amountMin: minAmountOut,
+            })
+         );
+      }
+
+      const commands = encodeCommands(commandList);
+      const data = encodeExecute(commands, inputs, deadline);
+
+      return {
+         to: this.routerAddress,
+         data,
+         value: 0n,
+      };
+   }
+
+   // expose addresses for the execution service approval flow
+   getRouterAddress(): Address {
+      return this.routerAddress;
+   }
+
+   getPermit2Address(): Address {
+      return PERMIT2_ADDRESS;
+   }
+
+   getChainId(): number {
+      return this.chainId;
    }
 
    // -- path building (same as v3 adapter) --
