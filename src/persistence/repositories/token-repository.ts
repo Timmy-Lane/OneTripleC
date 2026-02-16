@@ -31,6 +31,19 @@ export async function findTokenByChainAndAddress(
   return token || null;
 }
 
+export async function findTokenByChainAndSymbol(
+  chainId: number,
+  symbol: string
+): Promise<Token | null> {
+  const [token] = await db
+    .select()
+    .from(tokens)
+    .where(and(eq(tokens.chainId, chainId), eq(tokens.symbol, symbol)))
+    .limit(1);
+
+  return token || null;
+}
+
 export async function findAllTokens(): Promise<Token[]> {
   return db.select().from(tokens);
 }

@@ -12,7 +12,7 @@ import type {
    SwapQuote as InternalSwapQuote,
 } from '../../adapters/dex/types.js';
 import { Address, formatEther } from 'viem';
-import { WETH } from '../../adapters/tokens/weth.js';
+import { getWethAddress } from '../../adapters/tokens/weth.js';
 import { getViemClient } from '../../adapters/blockchain/viem-client.js';
 import { getNativePriceUsd } from '../../adapters/coingecko/index.js';
 import { AcrossAdapter } from '../../adapters/bridge/across-adapter.js';
@@ -100,7 +100,7 @@ export class QuoteService {
    ): Promise<QuoteResult[]> {
       const quotes: QuoteResult[] = [];
 
-      const quoteParams = this.buildQuoteParams(request);
+      const quoteParams = await this.buildQuoteParams(request);
       if (!quoteParams) {
          logger.error({ request }, 'Failed to build quote params');
          return quotes;
@@ -208,13 +208,13 @@ export class QuoteService {
       }
    }
 
-   private buildQuoteParams(request: QuoteRequest): QuoteParams | null {
+   private async buildQuoteParams(request: QuoteRequest): Promise<QuoteParams | null> {
       try {
          let fromToken = request.sourceToken as Address;
          let toToken = request.targetToken as Address;
          const amount = BigInt(request.sourceAmount);
 
-         const wethAddress = WETH.getAddress(request.sourceChainId);
+         const wethAddress = await getWethAddress(request.sourceChainId);
          if (!wethAddress) {
             logger.error(
                { chainId: request.sourceChainId },

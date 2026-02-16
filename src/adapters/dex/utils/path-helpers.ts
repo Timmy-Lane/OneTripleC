@@ -1,12 +1,12 @@
 import { Address, isAddressEqual } from 'viem';
-import { WETH } from '../../tokens/weth.js';
+import { getWethAddress } from '../../tokens/weth.js';
 
-export function isPairedWithWeth(
+export async function isPairedWithWeth(
   token0: Address,
   token1: Address,
   chainId: number
-): boolean {
-  const wethAddress = WETH.getAddress(chainId);
+): Promise<boolean> {
+  const wethAddress = await getWethAddress(chainId);
   if (!wethAddress) return false;
 
   return (

@@ -18,7 +18,7 @@ import type {
 import { getViemClient } from '../blockchain/viem-client.js';
 import { getQuoterAddress } from './utils/index.js';
 import { getDeadline } from './utils/deadline.js';
-import { WETH } from '../tokens/weth.js';
+import { getWethAddress } from '../tokens/weth.js';
 import { isPairedWithWeth } from './utils/path-helpers.js';
 import {
    getUniversalRouterAddress,
@@ -107,12 +107,12 @@ export class UniversalRouterAdapter implements DexAdapter {
          return null;
       }
 
-      const wethAddress = WETH.getAddress(this.chainId);
+      const wethAddress = await getWethAddress(this.chainId);
       if (!wethAddress) {
          return null;
       }
 
-      const isSingleHop = isPairedWithWeth(fromToken, toToken, this.chainId);
+      const isSingleHop = await isPairedWithWeth(fromToken, toToken, this.chainId);
       const intermediateTokens = params.intermediateTokens;
 
       const attempts: Promise<QuoteAttempt | null>[] = [];
@@ -307,7 +307,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          );
       }
 
-      const outputIsWeth = this.isOutputWeth(quote.toToken);
+      const outputIsWeth = await this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -357,7 +357,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          );
       }
 
-      const outputIsWeth = this.isOutputWeth(quote.toToken);
+      const outputIsWeth = await this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -406,7 +406,7 @@ export class UniversalRouterAdapter implements DexAdapter {
       const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
       const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
 
-      const outputIsWeth = this.isOutputWeth(quote.toToken);
+      const outputIsWeth = await this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -482,7 +482,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          permit
       );
 
-      const outputIsWeth = this.isOutputWeth(quote.toToken);
+      const outputIsWeth = await this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -552,7 +552,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          permit
       );
 
-      const outputIsWeth = this.isOutputWeth(quote.toToken);
+      const outputIsWeth = await this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -620,8 +620,8 @@ export class UniversalRouterAdapter implements DexAdapter {
       }
    }
 
-   private isOutputWeth(toToken: Address): boolean {
-      const wethAddress = WETH.getAddress(this.chainId);
+   private async isOutputWeth(toToken: Address): Promise<boolean> {
+      const wethAddress = await getWethAddress(this.chainId);
       return !!wethAddress && toToken.toLowerCase() === wethAddress.toLowerCase();
    }
 

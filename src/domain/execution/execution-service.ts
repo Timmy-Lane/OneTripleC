@@ -24,7 +24,7 @@ import { getDeadline } from '../../adapters/dex/utils/deadline.js';
 import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
 import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
 import { PERMIT2_ADDRESS } from '../../adapters/dex/universal-router/constants.js';
-import { WETH } from '../../adapters/tokens/weth.js';
+import { getWethAddress } from '../../adapters/tokens/weth.js';
 
 const VIEM_CHAINS: Record<number, Chain> = {
    1: mainnet,
@@ -296,7 +296,7 @@ export function createExecutionService(
       const isNativeOutput =
          step.toToken.toLowerCase() === NATIVE_ZERO;
 
-      const wethAddress = WETH.getAddress(chainId);
+      const wethAddress = await getWethAddress(chainId);
       const fromToken = isNativeInput && wethAddress
          ? wethAddress : step.fromToken as Address;
       const toToken = isNativeOutput && wethAddress

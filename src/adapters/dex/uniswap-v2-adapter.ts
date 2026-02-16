@@ -18,7 +18,7 @@ import type {
 import { getViemClient } from '../blockchain/viem-client.js';
 import { getRouterAddress } from './utils/index.js';
 import { getDeadline } from './utils/deadline.js';
-import { WETH } from '../tokens/weth.js';
+import { getWethAddress } from '../tokens/weth.js';
 import { isPairedWithWeth, getOtherToken } from './utils/path-helpers.js';
 
 const PAIR_ABI_GET_RESERVES =
@@ -52,7 +52,7 @@ export class UniswapV2Adapter implements DexAdapter {
       return null;
     }
 
-    const pathResult = this.buildPath(params);
+    const pathResult = await this.buildPath(params);
     if (!pathResult) {
       console.error(
         `[UniswapV2Adapter] Failed to build path for ${fromToken} -> ${toToken}`
@@ -223,19 +223,19 @@ export class UniswapV2Adapter implements DexAdapter {
     };
   }
 
-  private buildPath(params: QuoteParams): {
+  private async buildPath(params: QuoteParams): Promise<{
     path: SwapPath;
     pool: Pool;
     intermediatePool?: IntermediatePool;
-  } | null {
+  } | null> {
     const { fromToken, toToken, side, intermediateTokens } = params;
 
-    const wethAddress = WETH.getAddress(this.chainId);
+    const wethAddress = await getWethAddress(this.chainId);
     if (!wethAddress) {
       return null;
     }
 
-    const isSingleHop = isPairedWithWeth(fromToken, toToken, this.chainId);
+    const isSingleHop = await isPairedWithWeth(fromToken, toToken, this.chainId);
 
     if (isSingleHop) {
       return this.buildSingleHopPath(fromToken, toToken);

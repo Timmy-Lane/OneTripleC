@@ -46,17 +46,15 @@ mock.module('../utils/deadline.js', () => ({
 
 // mock WETH
 mock.module('../../tokens/weth.js', () => ({
-   WETH: {
-      getAddress: mock(
-         () => '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address
-      ),
-   },
+   getWethAddress: mock(
+      async () => '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address
+   ),
 }));
 
 // mock path helpers
 mock.module('../utils/path-helpers.js', () => ({
    isPairedWithWeth: mock(
-      (from: Address, to: Address, _chainId: number) => {
+      async (from: Address, to: Address, _chainId: number) => {
          const weth = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
          return (
             from.toLowerCase() === weth.toLowerCase() ||

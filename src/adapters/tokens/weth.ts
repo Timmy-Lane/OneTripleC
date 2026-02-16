@@ -1,36 +1,23 @@
 import { Address } from 'viem';
-import { Token, TokenConfig } from './token.js';
+import { findTokenByChainAndSymbol } from '../../persistence/repositories/token-repository.js';
 
-export const WETH_ADDRESSES: Record<number, Address> = {
-   1: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
-   8453: '0x4200000000000000000000000000000000000006',
-   42161: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',
-   10: '0x4200000000000000000000000000000000000006',
-   137: '0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',
-};
+// cache WETH addresses per chain -- they never change at runtime
+const wethCache = new Map<number, Address>();
 
-export class WETH extends Token {
-   constructor(chainId: number) {
-      const address = WETH_ADDRESSES[chainId];
-      if (!address) {
-         throw new Error(`WETH not configured for chain ${chainId}`);
-      }
+export async function getWethAddress(chainId: number): Promise<Address | null> {
+   const cached = wethCache.get(chainId);
+   if (cached) return cached;
 
-      super({
-         address,
-         decimals: 18,
-         symbol: 'WETH',
-         chainId,
-      });
-   }
+   const token = await findTokenByChainAndSymbol(chainId, 'WETH');
+   if (!token) return null;
 
-   public static isWETH(address: Address, chainId: number): boolean {
-      const wethAddress = WETH_ADDRESSES[chainId];
-      if (!wethAddress) return false;
-      return address.toLowerCase() === wethAddress.toLowerCase();
-   }
+   const address = token.address as Address;
+   wethCache.set(chainId, address);
+   return address;
+}
 
-   public static getAddress(chainId: number): Address | null {
-      return WETH_ADDRESSES[chainId] || null;
-   }
+export async function isWeth(address: Address, chainId: number): Promise<boolean> {
+   const wethAddress = await getWethAddress(chainId);
+   if (!wethAddress) return false;
+   return address.toLowerCase() === wethAddress.toLowerCase();
 }

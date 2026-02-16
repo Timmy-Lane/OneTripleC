@@ -25,11 +25,9 @@ mock.module('../../../adapters/dex/universal-router/constants.js', () => ({
 }));
 
 mock.module('../../../adapters/tokens/weth.js', () => ({
-   WETH: {
-      getAddress: mock(
-         () => '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address
-      ),
-   },
+   getWethAddress: mock(
+      async () => '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address
+   ),
 }));
 
 const mockGetGasPrice = mock(() => Promise.resolve(20000000000n)); // 20 gwei
