@@ -24,6 +24,7 @@ import { getDeadline } from '../../adapters/dex/utils/deadline.js';
 import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
 import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
 import { PERMIT2_ADDRESS } from '../../adapters/dex/universal-router/constants.js';
+import { WETH } from '../../adapters/tokens/weth.js';
 
 const VIEM_CHAINS: Record<number, Chain> = {
    1: mainnet,
@@ -288,10 +289,23 @@ export function createExecutionService(
       // create UR adapter for this chain
       const urAdapter = new UniversalRouterAdapter({ chainId, rpcUrl });
 
+      // detect native ETH input -- convert to WETH for the adapter
+      const NATIVE_ZERO = '0x0000000000000000000000000000000000000000';
+      const isNativeInput =
+         step.fromToken.toLowerCase() === NATIVE_ZERO;
+      const isNativeOutput =
+         step.toToken.toLowerCase() === NATIVE_ZERO;
+
+      const wethAddress = WETH.getAddress(chainId);
+      const fromToken = isNativeInput && wethAddress
+         ? wethAddress : step.fromToken as Address;
+      const toToken = isNativeOutput && wethAddress
+         ? wethAddress : step.toToken as Address;
+
       // build a minimal SwapQuote from the route step for the adapter
       const swapQuote = {
-         fromToken: step.fromToken as Address,
-         toToken: step.toToken as Address,
+         fromToken,
+         toToken,
          fromAmount: BigInt(step.fromAmount),
          toAmount: step.toAmountMin ? BigInt(step.toAmountMin) : 0n,
          protocol: 'universal-router' as const,
@@ -301,31 +315,44 @@ export function createExecutionService(
          fee: 0n,
          path: {
             pools: [],
-            tokens: [step.fromToken as Address, step.toToken as Address],
+            tokens: [fromToken, toToken],
             encodedPath: step.calldata as Hex | undefined,
          },
          pool: {
             address: '0x0000000000000000000000000000000000000000' as Address,
-            token0: step.fromToken as Address,
-            token1: step.toToken as Address,
+            token0: fromToken,
+            token1: toToken,
             dex: 'uniswap' as const,
             version: 'v3' as const,
             chainId,
          },
       };
 
-      // use signTypedData from the wallet client account
-      const signTypedData = async (params: any): Promise<Hex> => {
-         return account.signTypedData(params);
-      };
+      let tx;
 
-      // build the full UR calldata with Permit2 signature
-      const tx = await urAdapter.buildSwapWithPermit(
-         swapQuote,
-         walletAddress,
-         slippageBps,
-         signTypedData
-      );
+      if (isNativeInput) {
+         // native ETH: use WRAP_ETH + swap (no Permit2 needed)
+         console.log(
+            `[ExecutionService] Native ETH input detected, using WRAP_ETH flow`
+         );
+         tx = await urAdapter.buildNativeInputSwapTransaction(
+            swapQuote,
+            walletAddress,
+            slippageBps
+         );
+      } else {
+         // ERC20 token: use Permit2 flow
+         const signTypedData = async (params: any): Promise<Hex> => {
+            return account.signTypedData(params);
+         };
+
+         tx = await urAdapter.buildSwapWithPermit(
+            swapQuote,
+            walletAddress,
+            slippageBps,
+            signTypedData
+         );
+      }
 
       console.log(
          `[ExecutionService] Submitting UR swap via ${urAdapter.getRouterAddress()}`

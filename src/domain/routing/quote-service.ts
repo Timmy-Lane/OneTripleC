@@ -210,8 +210,8 @@ export class QuoteService {
 
    private buildQuoteParams(request: QuoteRequest): QuoteParams | null {
       try {
-         const fromToken = request.sourceToken as Address;
-         const toToken = request.targetToken as Address;
+         let fromToken = request.sourceToken as Address;
+         let toToken = request.targetToken as Address;
          const amount = BigInt(request.sourceAmount);
 
          const wethAddress = WETH.getAddress(request.sourceChainId);
@@ -221,6 +221,16 @@ export class QuoteService {
                'WETH not configured for chain'
             );
             return null;
+         }
+
+         // convert native ETH (zero address) to WETH for quoting --
+         // Uniswap pools use WETH, not native ETH
+         const NATIVE_ZERO = '0x0000000000000000000000000000000000000000';
+         if (fromToken.toLowerCase() === NATIVE_ZERO) {
+            fromToken = wethAddress;
+         }
+         if (toToken.toLowerCase() === NATIVE_ZERO) {
+            toToken = wethAddress;
          }
 
          const isBuy = toToken.toLowerCase() !== wethAddress.toLowerCase();
@@ -269,12 +279,14 @@ export class QuoteService {
             ? swapQuote.path.encodedPath
             : swapQuote.calldata;
 
+      // use the original request tokens (not the adapter's WETH-substituted ones)
+      // so the execution service can detect native ETH and use WRAP_ETH
       steps.push({
          type: RouteStepType.SWAP,
          chainId: request.sourceChainId,
          protocol: swapQuote.protocol,
-         fromToken: swapQuote.fromToken,
-         toToken: swapQuote.toToken,
+         fromToken: request.sourceToken,
+         toToken: request.targetToken,
          fromAmount: swapQuote.fromAmount.toString(),
          toAmountMin: swapQuote.toAmount.toString(),
          contractAddress: swapQuote.dexAddress,

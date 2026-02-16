@@ -30,6 +30,7 @@ import {
    encodeCommands,
    encodeV3SwapExactIn,
    encodeV2SwapExactIn,
+   encodeWrapEth,
    encodeUnwrapWeth,
    encodePermit2Permit,
    encodeExecute,
@@ -335,6 +336,62 @@ export class UniversalRouterAdapter implements DexAdapter {
       const data = encodeExecute(commands, inputs, deadline);
 
       return { to: this.routerAddress, data, value: 0n };
+   }
+
+   // -- native ETH input: WRAP_ETH + V3 swap (no Permit2 needed) --
+
+   async buildNativeInputSwapTransaction(
+      quote: SwapQuote,
+      recipient: Address,
+      slippageBps: number
+   ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      this.validateBuildParams(recipient, slippageBps);
+
+      const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
+      const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
+
+      const encodedPath = quote.path.encodedPath;
+      if (!encodedPath) {
+         throw new Error(
+            '[UniversalRouterAdapter] Missing encoded path in quote'
+         );
+      }
+
+      const outputIsWeth = this.isOutputWeth(quote.toToken);
+
+      const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
+      const inputs: Hex[] = [];
+
+      // command 1: WRAP_ETH -- wraps msg.value into WETH held by router
+      commandList.push({ id: UR_COMMAND.WRAP_ETH });
+      inputs.push(
+         encodeWrapEth({ recipient: UR_RECIPIENT_ROUTER, amount: quote.fromAmount })
+      );
+
+      // command 2: V3_SWAP_EXACT_IN -- router pays from wrapped WETH
+      commandList.push({ id: UR_COMMAND.V3_SWAP_EXACT_IN });
+      inputs.push(
+         encodeV3SwapExactIn({
+            recipient: outputIsWeth ? UR_RECIPIENT_ROUTER : recipient,
+            amountIn: quote.fromAmount,
+            amountOutMin: minAmountOut,
+            path: encodedPath,
+            payerIsUser: false, // router pays from wrapped ETH
+         })
+      );
+
+      // command 3 (optional): UNWRAP_WETH if output is native ETH
+      if (outputIsWeth) {
+         commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
+         inputs.push(
+            encodeUnwrapWeth({ recipient, amountMin: minAmountOut })
+         );
+      }
+
+      const commands = encodeCommands(commandList);
+      const data = encodeExecute(commands, inputs, deadline);
+
+      return { to: this.routerAddress, data, value: quote.fromAmount };
    }
 
    // -- phase 4b: V2 swap via universal router --
