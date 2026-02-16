@@ -140,6 +140,53 @@ describe('QuoteService', () => {
          expect(results[0].route.provider).toBe('universal-router');
       });
 
+      test('populates display metadata from pool data', async () => {
+         const internalQuote = makeInternalQuote({
+            protocol: 'universal-router',
+            pool: {
+               address: '0x1234567890123456789012345678901234567890' as Address,
+               token0: USDC,
+               token1: WETH_ADDR,
+               dex: 'uniswap',
+               version: 'v3',
+               chainId: 1,
+               v3Data: { fee: 3000 },
+            },
+         });
+         mockURGetQuote.mockResolvedValueOnce(internalQuote);
+
+         const results = await service.fetchQuotes(baseRequest);
+
+         expect(results).toHaveLength(1);
+         const route = results[0].route;
+         expect(route.poolVersion).toBe('v3');
+         expect(route.poolFeeBps).toBe(30); // 3000 / 100
+         expect(route.gasPriceGwei).toBe('20'); // mock returns 20 gwei
+         expect(route.totalFeeUsd).toBeDefined();
+         expect(typeof route.totalFeeUsd).toBe('string');
+      });
+
+      test('populates V2 pool metadata with default 30 bps fee', async () => {
+         const internalQuote = makeInternalQuote({
+            protocol: 'universal-router',
+            pool: {
+               address: '0x1234567890123456789012345678901234567890' as Address,
+               token0: USDC,
+               token1: WETH_ADDR,
+               dex: 'uniswap',
+               version: 'v2',
+               chainId: 1,
+            },
+         });
+         mockURGetQuote.mockResolvedValueOnce(internalQuote);
+
+         const results = await service.fetchQuotes(baseRequest);
+
+         expect(results).toHaveLength(1);
+         expect(results[0].route.poolVersion).toBe('v2');
+         expect(results[0].route.poolFeeBps).toBe(30);
+      });
+
       test('returns empty when adapter fails', async () => {
          mockURGetQuote.mockRejectedValueOnce(new Error('RPC timeout'));
 

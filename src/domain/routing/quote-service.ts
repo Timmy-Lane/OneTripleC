@@ -11,7 +11,7 @@ import type {
    QuoteParams,
    SwapQuote as InternalSwapQuote,
 } from '../../adapters/dex/types.js';
-import { Address, formatEther } from 'viem';
+import { Address, formatEther, formatGwei } from 'viem';
 import { getWethAddress } from '../../adapters/tokens/weth.js';
 import { getViemClient } from '../../adapters/blockchain/viem-client.js';
 import { getNativePriceUsd } from '../../adapters/coingecko/index.js';
@@ -176,11 +176,12 @@ export class QuoteService {
             estimatedGas: bridgeQuote.estimatedGas.toString(),
          });
 
-         const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
-            bridgeQuote.estimatedGas.toString(),
-            '0',
-            request.sourceChainId
-         );
+         const { totalFee, totalFeeUsd, gasPriceGwei } =
+            await this.calculateTotalFee(
+               bridgeQuote.estimatedGas.toString(),
+               '0',
+               request.sourceChainId
+            );
 
          return [
             {
@@ -196,6 +197,8 @@ export class QuoteService {
                   },
                   slippageBps: request.slippageBps || 50,
                   provider: 'across',
+                  gasPriceGwei,
+                  totalFeeUsd,
                },
                estimatedOutput: bridgeQuote.estimatedOutput.toString(),
                totalFee,
@@ -208,7 +211,9 @@ export class QuoteService {
       }
    }
 
-   private async buildQuoteParams(request: QuoteRequest): Promise<QuoteParams | null> {
+   private async buildQuoteParams(
+      request: QuoteRequest
+   ): Promise<QuoteParams | null> {
       try {
          let fromToken = request.sourceToken as Address;
          let toToken = request.targetToken as Address;
@@ -294,11 +299,19 @@ export class QuoteService {
          estimatedGas: swapQuote.estimatedGas.toString(),
       });
 
-      const { totalFee, totalFeeUsd } = await this.calculateTotalFee(
-         swapQuote.estimatedGas.toString(),
-         swapQuote.fee.toString(),
-         request.sourceChainId
-      );
+      const { totalFee, totalFeeUsd, gasPriceGwei } =
+         await this.calculateTotalFee(
+            swapQuote.estimatedGas.toString(),
+            swapQuote.fee.toString(),
+            request.sourceChainId
+         );
+
+      const poolVersion = swapQuote.pool?.version;
+      const poolFeeBps = swapQuote.pool?.v3Data
+         ? swapQuote.pool.v3Data.fee / 100
+         : poolVersion === 'v2'
+           ? 30
+           : undefined;
 
       return {
          route: {
@@ -311,6 +324,10 @@ export class QuoteService {
             },
             slippageBps: request.slippageBps || 50,
             provider: adapterName,
+            poolVersion,
+            poolFeeBps,
+            gasPriceGwei,
+            totalFeeUsd,
          },
          estimatedOutput: swapQuote.toAmount.toString(),
          totalFee,
@@ -326,7 +343,11 @@ export class QuoteService {
       gasEstimate: string,
       dexFee: string,
       chainId: number
-   ): Promise<{ totalFee: string; totalFeeUsd?: string }> {
+   ): Promise<{
+      totalFee: string;
+      totalFeeUsd?: string;
+      gasPriceGwei: string;
+   }> {
       let gasPrice: bigint;
       try {
          const rpcUrl = getRpcUrlForChain(chainId);
@@ -336,6 +357,8 @@ export class QuoteService {
          // fallback to 20 gwei if RPC call fails
          gasPrice = BigInt(20) * BigInt(1e9);
       }
+
+      const gasPriceGwei = formatGwei(gasPrice);
 
       const gasWei = BigInt(gasEstimate) * gasPrice;
       const total = gasWei + BigInt(dexFee);
@@ -354,7 +377,7 @@ export class QuoteService {
          // non-critical, skip USD conversion
       }
 
-      return { totalFee, totalFeeUsd };
+      return { totalFee, totalFeeUsd, gasPriceGwei };
    }
 }
 
@@ -362,5 +385,4 @@ export function createQuoteService(): QuoteService {
    return new QuoteService();
 }
 
-// singleton instance -- adapters are created per-chain on demand
 export const quoteService = new QuoteService();
