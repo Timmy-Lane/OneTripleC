@@ -4,7 +4,7 @@ import { RouteStepType } from '../../shared/types/quote.js';
 import { UniswapV2Adapter } from '../../adapters/dex/uniswap-v2-adapter.js';
 import { UniswapV3Adapter } from '../../adapters/dex/uniswap-v3-adapter.js';
 import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
-import { getUniversalRouterAddress } from '../../adapters/dex/universal-router/constants.js';
+import { getUniversalRouterAddress, PERMIT2_ADDRESS } from '../../adapters/dex/universal-router/constants.js';
 import type { DexAdapter, QuoteParams, SwapQuote as InternalSwapQuote } from '../../adapters/dex/types.js';
 import { Address, formatEther } from 'viem';
 import { WETH } from '../../adapters/tokens/weth.js';
@@ -234,6 +234,11 @@ export class QuoteService {
     const steps: RouteStep[] = [];
 
     if (this.needsApproval(request.sourceToken)) {
+      // UR swaps approve Permit2 (not the router), all others approve the dex directly
+      const approvalSpender = swapQuote.protocol === 'universal-router'
+        ? PERMIT2_ADDRESS
+        : swapQuote.dexAddress;
+
       steps.push({
         type: RouteStepType.APPROVE,
         chainId: request.sourceChainId,
@@ -241,7 +246,7 @@ export class QuoteService {
         fromToken: request.sourceToken,
         toToken: request.sourceToken,
         fromAmount: request.sourceAmount,
-        spender: swapQuote.dexAddress,
+        spender: approvalSpender,
         contractAddress: request.sourceToken,
       });
     }

@@ -22,6 +22,8 @@ import { ExecutionState } from '../../shared/types/index.js';
 import type { RouteStep } from '../../shared/types/quote.js';
 import { getDeadline } from '../../adapters/dex/utils/deadline.js';
 import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
+import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
+import { PERMIT2_ADDRESS } from '../../adapters/dex/universal-router/constants.js';
 
 const VIEM_CHAINS: Record<number, Chain> = {
    1: mainnet,
@@ -241,9 +243,101 @@ export function createExecutionService(
          });
       }
 
+      // universal-router calldata is built via the adapter (not here)
+      // this function should never be called for UR protocol
       throw new Error(
          `Unsupported protocol for calldata building: ${step.protocol}`
       );
+   }
+
+   // determine the approval target for a given protocol
+   function getApprovalTarget(
+      step: RouteStep
+   ): Address {
+      if (step.protocol === 'universal-router') {
+         // UR uses Permit2 as the approval target
+         return PERMIT2_ADDRESS;
+      }
+      // V2/V3 approve the router directly
+      return step.contractAddress as Address;
+   }
+
+   // execute a universal router swap using the adapter with Permit2 permit flow
+   async function executeURSwapStep(
+      step: RouteStep,
+      walletId: string,
+      walletAddress: Address,
+      chainId: number,
+      slippageBps: number
+   ): Promise<string> {
+      const privateKey = await walletService.getPrivateKey(walletId);
+      const account = privateKeyToAccount(privateKey);
+
+      const chain = VIEM_CHAINS[chainId];
+      if (!chain) {
+         throw new Error(`Unsupported chain: ${chainId}`);
+      }
+
+      const rpcUrl = getRpcUrl(chainId);
+      const walletClient = createWalletClient({
+         account,
+         chain,
+         transport: http(rpcUrl),
+      });
+
+      // create UR adapter for this chain
+      const urAdapter = new UniversalRouterAdapter({ chainId, rpcUrl });
+
+      // build a minimal SwapQuote from the route step for the adapter
+      const swapQuote = {
+         fromToken: step.fromToken as Address,
+         toToken: step.toToken as Address,
+         fromAmount: BigInt(step.fromAmount),
+         toAmount: step.toAmountMin ? BigInt(step.toAmountMin) : 0n,
+         protocol: 'universal-router' as const,
+         dexAddress: urAdapter.getRouterAddress(),
+         calldata: '0x' as Hex,
+         estimatedGas: step.estimatedGas ? BigInt(step.estimatedGas) : 200000n,
+         fee: 0n,
+         path: {
+            pools: [],
+            tokens: [step.fromToken as Address, step.toToken as Address],
+            encodedPath: step.calldata as Hex | undefined,
+         },
+         pool: {
+            address: '0x0000000000000000000000000000000000000000' as Address,
+            token0: step.fromToken as Address,
+            token1: step.toToken as Address,
+            dex: 'uniswap' as const,
+            version: 'v3' as const,
+            chainId,
+         },
+      };
+
+      // use signTypedData from the wallet client account
+      const signTypedData = async (params: any): Promise<Hex> => {
+         return account.signTypedData(params);
+      };
+
+      // build the full UR calldata with Permit2 signature
+      const tx = await urAdapter.buildSwapWithPermit(
+         swapQuote,
+         walletAddress,
+         slippageBps,
+         signTypedData
+      );
+
+      console.log(
+         `[ExecutionService] Submitting UR swap via ${urAdapter.getRouterAddress()}`
+      );
+
+      const txHash = await walletClient.sendTransaction({
+         to: tx.to,
+         data: tx.data,
+         value: tx.value,
+      });
+
+      return txHash;
    }
 
    async function executeSwapStep(
@@ -253,6 +347,13 @@ export function createExecutionService(
       chainId: number,
       slippageBps: number
    ): Promise<string> {
+      // universal router uses its own execution path with Permit2
+      if (step.protocol === 'universal-router') {
+         return executeURSwapStep(
+            step, walletId, walletAddress, chainId, slippageBps
+         );
+      }
+
       // Get private key
       const privateKey = await walletService.getPrivateKey(walletId);
       const account = privateKeyToAccount(privateKey);
@@ -362,7 +463,8 @@ export function createExecutionService(
 
          if (!isNativeToken && swapStep.contractAddress) {
             const fromAmount = BigInt(swapStep.fromAmount);
-            const spender = swapStep.contractAddress as Address;
+            // UR swaps approve Permit2, not the router
+            const spender = getApprovalTarget(swapStep);
 
             console.log(
                `[ExecutionService] Checking allowance for ${sourceToken}`

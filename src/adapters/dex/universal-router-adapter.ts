@@ -5,6 +5,7 @@ import {
    parseAbiItem,
    numberToHex,
    pad,
+   isAddress,
 } from 'viem';
 import type {
    DexAdapter,
@@ -23,10 +24,12 @@ import {
    getUniversalRouterAddress,
    PERMIT2_ADDRESS,
    UR_COMMAND,
+   FeeAmount,
    UR_RECIPIENT_ROUTER,
    UR_RECIPIENT_SENDER,
    encodeCommands,
    encodeV3SwapExactIn,
+   encodeV2SwapExactIn,
    encodeUnwrapWeth,
    encodePermit2Permit,
    encodeExecute,
@@ -41,10 +44,33 @@ const QUOTER_ABI_EXACT_INPUT =
 // extra gas overhead for universal router command dispatch vs direct v3 router
 const UR_GAS_OVERHEAD = 30000n;
 
+// fee tiers to try when quoting, ordered by most common first
+const FEE_TIERS = [FeeAmount.MEDIUM, FeeAmount.LOW, FeeAmount.HIGH, FeeAmount.LOWEST];
+
+// deadline bounds in minutes
+const MAX_DEADLINE_MINUTES = 30;
+const MIN_DEADLINE_MINUTES = 2;
+const DEFAULT_DEADLINE_MINUTES = 20;
+
+// slippage bounds in bps
+const MAX_SLIPPAGE_BPS = 5000; // 50%
+const MIN_SLIPPAGE_BPS = 0;
+
 export interface UniversalRouterAdapterConfig {
    chainId: number;
    rpcUrl: string;
 }
+
+type QuoteAttempt = {
+   amountOut: bigint;
+   gasEstimate: bigint;
+   feeTier: number;
+   feeTier2?: number;
+   encodedPath: Hex;
+   path: SwapPath;
+   pool: Pool;
+   intermediatePool?: IntermediatePool;
+};
 
 export class UniversalRouterAdapter implements DexAdapter {
    private readonly chainId: number;
@@ -64,10 +90,13 @@ export class UniversalRouterAdapter implements DexAdapter {
       this.routerAddress = addr;
    }
 
-   // -- quoting: same as v3 adapter, uses v3 Quoter contract --
+   // -- phase 4a: multi-fee-tier quoting --
+   // tries multiple fee tiers in parallel and returns the best output
 
    async getQuote(params: QuoteParams): Promise<SwapQuote | null> {
       const { fromToken, toToken, amount } = params;
+
+      this.validateQuoteParams(params);
 
       const quoterAddress = getQuoterAddress('uniswap', this.chainId);
       if (!quoterAddress) {
@@ -77,15 +106,102 @@ export class UniversalRouterAdapter implements DexAdapter {
          return null;
       }
 
-      const pathResult = this.buildPath(params);
-      if (!pathResult) {
+      const wethAddress = WETH.getAddress(this.chainId);
+      if (!wethAddress) {
+         return null;
+      }
+
+      const isSingleHop = isPairedWithWeth(fromToken, toToken, this.chainId);
+      const intermediateTokens = params.intermediateTokens;
+
+      const attempts: Promise<QuoteAttempt | null>[] = [];
+
+      if (isSingleHop) {
+         for (const fee of FEE_TIERS) {
+            attempts.push(
+               this.tryQuote(quoterAddress, fromToken, toToken, amount, fee)
+            );
+         }
+      } else {
+         const intermediateToken =
+            intermediateTokens && intermediateTokens.length > 0
+               ? intermediateTokens[0]
+               : wethAddress;
+
+         // common fee tier combos for multi-hop
+         const multiHopFees: [number, number][] = [
+            [FeeAmount.MEDIUM, FeeAmount.MEDIUM],
+            [FeeAmount.LOW, FeeAmount.MEDIUM],
+            [FeeAmount.MEDIUM, FeeAmount.LOW],
+            [FeeAmount.LOW, FeeAmount.LOW],
+         ];
+
+         for (const [fee1, fee2] of multiHopFees) {
+            attempts.push(
+               this.tryMultiHopQuote(
+                  quoterAddress, fromToken, intermediateToken, toToken,
+                  amount, fee1, fee2
+               )
+            );
+         }
+      }
+
+      const results = await Promise.all(attempts);
+      const successful = results.filter((r): r is QuoteAttempt => r !== null);
+
+      if (successful.length === 0) {
          console.error(
-            `[UniversalRouterAdapter] Failed to build path for ${fromToken} -> ${toToken}`
+            `[UniversalRouterAdapter] All fee tier attempts failed for ${fromToken} -> ${toToken}`
          );
          return null;
       }
 
-      const { encodedPath, path, pool, intermediatePool } = pathResult;
+      // pick best output amount
+      const best = successful.reduce((a, b) =>
+         a.amountOut > b.amountOut ? a : b
+      );
+
+      const swapQuote: SwapQuote = {
+         fromToken,
+         toToken,
+         fromAmount: amount,
+         toAmount: best.amountOut,
+         protocol: 'universal-router',
+         dexAddress: this.routerAddress,
+         calldata: '0x', // built in buildSwapTransaction
+         estimatedGas: best.gasEstimate + UR_GAS_OVERHEAD,
+         fee: this.estimateFee(best.pool),
+         path: best.path,
+         pool: best.pool,
+         ...(best.intermediatePool && { intermediatePool: best.intermediatePool }),
+      };
+
+      return swapQuote;
+   }
+
+   private async tryQuote(
+      quoterAddress: Address,
+      fromToken: Address,
+      toToken: Address,
+      amount: bigint,
+      fee: number
+   ): Promise<QuoteAttempt | null> {
+      const poolAddress = this.derivePoolAddress(fromToken, toToken, fee);
+      const pool: Pool = {
+         address: poolAddress,
+         token0: fromToken,
+         token1: toToken,
+         dex: 'uniswap',
+         version: 'v3',
+         chainId: this.chainId,
+         v3Data: { fee },
+      };
+      const encodedPath = this.encodePath([fromToken, toToken], [fee]);
+      const path: SwapPath = {
+         pools: [pool],
+         tokens: [fromToken, toToken],
+         encodedPath,
+      };
 
       try {
          const { result } = await this.client.simulateContract({
@@ -94,44 +210,94 @@ export class UniversalRouterAdapter implements DexAdapter {
             functionName: 'quoteExactInput',
             args: [encodedPath, amount],
          });
-
-         const amountOut = result[0] as bigint;
-         const gasEstimate = (result[3] as bigint) + UR_GAS_OVERHEAD;
-
-         const swapQuote: SwapQuote = {
-            fromToken,
-            toToken,
-            fromAmount: amount,
-            toAmount: amountOut,
-            protocol: 'universal-router',
-            dexAddress: this.routerAddress,
-            calldata: '0x', // built in buildSwapTransaction
-            estimatedGas: gasEstimate,
-            fee: this.estimateFee(pool),
+         return {
+            amountOut: result[0] as bigint,
+            gasEstimate: result[3] as bigint,
+            feeTier: fee,
+            encodedPath,
             path,
             pool,
-            ...(intermediatePool && { intermediatePool }),
          };
-
-         return swapQuote;
-      } catch (error: any) {
-         console.error(
-            `[UniversalRouterAdapter] Quote failed for pool ${pool.address}:`,
-            error.message
-         );
+      } catch {
          return null;
       }
    }
 
-   // -- execution: encodes for universal router execute() --
+   private async tryMultiHopQuote(
+      quoterAddress: Address,
+      fromToken: Address,
+      intermediateToken: Address,
+      toToken: Address,
+      amount: bigint,
+      fee1: number,
+      fee2: number
+   ): Promise<QuoteAttempt | null> {
+      const pool1Address = this.derivePoolAddress(fromToken, intermediateToken, fee1);
+      const pool2Address = this.derivePoolAddress(intermediateToken, toToken, fee2);
+
+      const pool1: Pool = {
+         address: pool1Address,
+         token0: fromToken,
+         token1: intermediateToken,
+         dex: 'uniswap',
+         version: 'v3',
+         chainId: this.chainId,
+         v3Data: { fee: fee1 },
+      };
+      const pool2: IntermediatePool = {
+         address: pool2Address,
+         token0: intermediateToken,
+         token1: toToken,
+         dex: 'uniswap',
+         version: 'v3',
+         chainId: this.chainId,
+         v3Data: { fee: fee2 },
+         isIntermediate: true,
+      };
+
+      const encodedPath = this.encodePath(
+         [fromToken, intermediateToken, toToken],
+         [fee1, fee2]
+      );
+      const path: SwapPath = {
+         pools: [pool1, pool2],
+         tokens: [fromToken, intermediateToken, toToken],
+         encodedPath,
+      };
+
+      try {
+         const { result } = await this.client.simulateContract({
+            address: quoterAddress,
+            abi: [parseAbiItem(QUOTER_ABI_EXACT_INPUT)],
+            functionName: 'quoteExactInput',
+            args: [encodedPath, amount],
+         });
+         return {
+            amountOut: result[0] as bigint,
+            gasEstimate: result[3] as bigint,
+            feeTier: fee1,
+            feeTier2: fee2,
+            encodedPath,
+            path,
+            pool: pool1,
+            intermediatePool: pool2,
+         };
+      } catch {
+         return null;
+      }
+   }
+
+   // -- execution: encodes V3 swap for universal router execute() --
 
    async buildSwapTransaction(
       quote: SwapQuote,
       recipient: Address,
       slippageBps: number
    ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      this.validateBuildParams(recipient, slippageBps);
+
       const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
-      const deadline = getDeadline(20);
+      const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
 
       const encodedPath = quote.path.encodedPath;
       if (!encodedPath) {
@@ -140,11 +306,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          );
       }
 
-      // check if output is WETH -- if so, unwrap to native ETH
-      const wethAddress = WETH.getAddress(this.chainId);
-      const outputIsWeth =
-         wethAddress &&
-         quote.toToken.toLowerCase() === wethAddress.toLowerCase();
+      const outputIsWeth = this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -153,14 +315,11 @@ export class UniversalRouterAdapter implements DexAdapter {
       commandList.push({ id: UR_COMMAND.V3_SWAP_EXACT_IN });
       inputs.push(
          encodeV3SwapExactIn({
-            // if unwrapping, swap output goes to router first
-            recipient: outputIsWeth
-               ? UR_RECIPIENT_ROUTER
-               : recipient,
+            recipient: outputIsWeth ? UR_RECIPIENT_ROUTER : recipient,
             amountIn: quote.fromAmount,
             amountOutMin: minAmountOut,
             path: encodedPath,
-            payerIsUser: true, // tokens come from msg.sender via permit2
+            payerIsUser: true,
          })
       );
 
@@ -168,26 +327,60 @@ export class UniversalRouterAdapter implements DexAdapter {
       if (outputIsWeth) {
          commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
          inputs.push(
-            encodeUnwrapWeth({
-               recipient,
-               amountMin: minAmountOut,
-            })
+            encodeUnwrapWeth({ recipient, amountMin: minAmountOut })
          );
       }
 
       const commands = encodeCommands(commandList);
       const data = encodeExecute(commands, inputs, deadline);
 
-      return {
-         to: this.routerAddress,
-         data,
-         value: 0n,
-      };
+      return { to: this.routerAddress, data, value: 0n };
+   }
+
+   // -- phase 4b: V2 swap via universal router --
+
+   async buildV2SwapTransaction(
+      quote: SwapQuote,
+      recipient: Address,
+      slippageBps: number
+   ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      this.validateBuildParams(recipient, slippageBps);
+
+      const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
+      const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
+
+      const outputIsWeth = this.isOutputWeth(quote.toToken);
+
+      const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
+      const inputs: Hex[] = [];
+
+      // command 1: V2_SWAP_EXACT_IN
+      commandList.push({ id: UR_COMMAND.V2_SWAP_EXACT_IN });
+      inputs.push(
+         encodeV2SwapExactIn({
+            recipient: outputIsWeth ? UR_RECIPIENT_ROUTER : recipient,
+            amountIn: quote.fromAmount,
+            amountOutMin: minAmountOut,
+            path: quote.path.tokens,
+            payerIsUser: true,
+         })
+      );
+
+      // command 2 (optional): UNWRAP_WETH if output is native ETH
+      if (outputIsWeth) {
+         commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
+         inputs.push(
+            encodeUnwrapWeth({ recipient, amountMin: minAmountOut })
+         );
+      }
+
+      const commands = encodeCommands(commandList);
+      const data = encodeExecute(commands, inputs, deadline);
+
+      return { to: this.routerAddress, data, value: 0n };
    }
 
    // -- execution with permit2 signature --
-   // the execution service calls this instead of buildSwapTransaction when
-   // it has the user's private key available and wants gasless permit flow
 
    async buildSwapWithPermit(
       quote: SwapQuote,
@@ -195,8 +388,10 @@ export class UniversalRouterAdapter implements DexAdapter {
       slippageBps: number,
       signTypedData: (params: any) => Promise<Hex>
    ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      this.validateBuildParams(recipient, slippageBps);
+
       const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
-      const deadline = getDeadline(20);
+      const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
 
       const encodedPath = quote.path.encodedPath;
       if (!encodedPath) {
@@ -214,14 +409,13 @@ export class UniversalRouterAdapter implements DexAdapter {
       );
 
       // build permit params
-      const sigDeadline = deadline;
       const permit: Permit2PermitParams = {
          token: quote.fromToken,
          amount: quote.fromAmount,
          expiration: Math.floor(Date.now() / 1000) + 86400, // 24h
          nonce,
          spender: this.routerAddress,
-         sigDeadline,
+         sigDeadline: deadline,
       };
 
       // sign the permit via the caller-provided signing function
@@ -231,11 +425,7 @@ export class UniversalRouterAdapter implements DexAdapter {
          permit
       );
 
-      // check if output is WETH -- if so, unwrap to native ETH
-      const wethAddress = WETH.getAddress(this.chainId);
-      const outputIsWeth =
-         wethAddress &&
-         quote.toToken.toLowerCase() === wethAddress.toLowerCase();
+      const outputIsWeth = this.isOutputWeth(quote.toToken);
 
       const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
       const inputs: Hex[] = [];
@@ -248,9 +438,7 @@ export class UniversalRouterAdapter implements DexAdapter {
       commandList.push({ id: UR_COMMAND.V3_SWAP_EXACT_IN });
       inputs.push(
          encodeV3SwapExactIn({
-            recipient: outputIsWeth
-               ? UR_RECIPIENT_ROUTER
-               : recipient,
+            recipient: outputIsWeth ? UR_RECIPIENT_ROUTER : recipient,
             amountIn: quote.fromAmount,
             amountOutMin: minAmountOut,
             path: encodedPath,
@@ -262,24 +450,85 @@ export class UniversalRouterAdapter implements DexAdapter {
       if (outputIsWeth) {
          commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
          inputs.push(
-            encodeUnwrapWeth({
-               recipient,
-               amountMin: minAmountOut,
-            })
+            encodeUnwrapWeth({ recipient, amountMin: minAmountOut })
          );
       }
 
       const commands = encodeCommands(commandList);
       const data = encodeExecute(commands, inputs, deadline);
 
-      return {
-         to: this.routerAddress,
-         data,
-         value: 0n,
-      };
+      return { to: this.routerAddress, data, value: 0n };
    }
 
-   // expose addresses for the execution service approval flow
+   // -- V2 swap with permit2 --
+
+   async buildV2SwapWithPermit(
+      quote: SwapQuote,
+      recipient: Address,
+      slippageBps: number,
+      signTypedData: (params: any) => Promise<Hex>
+   ): Promise<{ to: Address; data: Hex; value: bigint }> {
+      this.validateBuildParams(recipient, slippageBps);
+
+      const minAmountOut = this.applySlippage(quote.toAmount, slippageBps);
+      const deadline = getDeadline(DEFAULT_DEADLINE_MINUTES);
+
+      const { nonce } = await getPermit2Nonce(
+         this.client.readContract.bind(this.client),
+         recipient,
+         quote.fromToken,
+         this.routerAddress
+      );
+
+      const permit: Permit2PermitParams = {
+         token: quote.fromToken,
+         amount: quote.fromAmount,
+         expiration: Math.floor(Date.now() / 1000) + 86400,
+         nonce,
+         spender: this.routerAddress,
+         sigDeadline: deadline,
+      };
+
+      const signature = await signPermit2(
+         signTypedData,
+         this.chainId,
+         permit
+      );
+
+      const outputIsWeth = this.isOutputWeth(quote.toToken);
+
+      const commandList: Array<{ id: number; allowRevert?: boolean }> = [];
+      const inputs: Hex[] = [];
+
+      commandList.push({ id: UR_COMMAND.PERMIT2_PERMIT });
+      inputs.push(encodePermit2Permit(permit, signature));
+
+      commandList.push({ id: UR_COMMAND.V2_SWAP_EXACT_IN });
+      inputs.push(
+         encodeV2SwapExactIn({
+            recipient: outputIsWeth ? UR_RECIPIENT_ROUTER : recipient,
+            amountIn: quote.fromAmount,
+            amountOutMin: minAmountOut,
+            path: quote.path.tokens,
+            payerIsUser: true,
+         })
+      );
+
+      if (outputIsWeth) {
+         commandList.push({ id: UR_COMMAND.UNWRAP_WETH });
+         inputs.push(
+            encodeUnwrapWeth({ recipient, amountMin: minAmountOut })
+         );
+      }
+
+      const commands = encodeCommands(commandList);
+      const data = encodeExecute(commands, inputs, deadline);
+
+      return { to: this.routerAddress, data, value: 0n };
+   }
+
+   // -- accessor methods for execution service --
+
    getRouterAddress(): Address {
       return this.routerAddress;
    }
@@ -292,138 +541,34 @@ export class UniversalRouterAdapter implements DexAdapter {
       return this.chainId;
    }
 
-   // -- path building (same as v3 adapter) --
+   // -- phase 5: input validation --
 
-   private buildPath(params: QuoteParams): {
-      encodedPath: Hex;
-      path: SwapPath;
-      pool: Pool;
-      intermediatePool?: IntermediatePool;
-   } | null {
-      const { fromToken, toToken, intermediateTokens } = params;
+   private validateQuoteParams(params: QuoteParams): void {
+      if (params.amount <= 0n) {
+         throw new Error('[UniversalRouterAdapter] Amount must be greater than zero');
+      }
+      if (params.fromToken.toLowerCase() === params.toToken.toLowerCase()) {
+         throw new Error('[UniversalRouterAdapter] fromToken and toToken must be different');
+      }
+   }
 
+   private validateBuildParams(recipient: Address, slippageBps: number): void {
+      if (recipient === '0x0000000000000000000000000000000000000000') {
+         throw new Error('[UniversalRouterAdapter] Recipient cannot be zero address');
+      }
+      if (slippageBps < MIN_SLIPPAGE_BPS || slippageBps > MAX_SLIPPAGE_BPS) {
+         throw new Error(
+            `[UniversalRouterAdapter] Slippage must be between ${MIN_SLIPPAGE_BPS} and ${MAX_SLIPPAGE_BPS} bps`
+         );
+      }
+   }
+
+   private isOutputWeth(toToken: Address): boolean {
       const wethAddress = WETH.getAddress(this.chainId);
-      if (!wethAddress) {
-         return null;
-      }
-
-      const isSingleHop = isPairedWithWeth(fromToken, toToken, this.chainId);
-
-      if (isSingleHop) {
-         return this.buildSingleHopPath(fromToken, toToken);
-      }
-
-      return this.buildMultiHopPath(
-         fromToken,
-         toToken,
-         wethAddress,
-         intermediateTokens
-      );
+      return !!wethAddress && toToken.toLowerCase() === wethAddress.toLowerCase();
    }
 
-   private buildSingleHopPath(
-      fromToken: Address,
-      toToken: Address
-   ): {
-      encodedPath: Hex;
-      path: SwapPath;
-      pool: Pool;
-   } | null {
-      const fee = 3000;
-      const poolAddress = this.derivePoolAddress(fromToken, toToken, fee);
-
-      const pool: Pool = {
-         address: poolAddress,
-         token0: fromToken,
-         token1: toToken,
-         dex: 'uniswap',
-         version: 'v3',
-         chainId: this.chainId,
-         v3Data: { fee },
-      };
-
-      const encodedPath = this.encodePath([fromToken, toToken], [fee]);
-
-      const path: SwapPath = {
-         pools: [pool],
-         tokens: [fromToken, toToken],
-         encodedPath,
-      };
-
-      return { encodedPath, path, pool };
-   }
-
-   private buildMultiHopPath(
-      fromToken: Address,
-      toToken: Address,
-      wethAddress: Address,
-      intermediateTokens?: Address[]
-   ): {
-      encodedPath: Hex;
-      path: SwapPath;
-      pool: Pool;
-      intermediatePool: IntermediatePool;
-   } | null {
-      const intermediateToken =
-         intermediateTokens && intermediateTokens.length > 0
-            ? intermediateTokens[0]
-            : wethAddress;
-
-      const fee1 = 3000;
-      const fee2 = 3000;
-
-      const pool1Address = this.derivePoolAddress(
-         fromToken,
-         intermediateToken,
-         fee1
-      );
-      const pool2Address = this.derivePoolAddress(
-         intermediateToken,
-         toToken,
-         fee2
-      );
-
-      const pool1: Pool = {
-         address: pool1Address,
-         token0: fromToken,
-         token1: intermediateToken,
-         dex: 'uniswap',
-         version: 'v3',
-         chainId: this.chainId,
-         v3Data: { fee: fee1 },
-      };
-
-      const pool2: IntermediatePool = {
-         address: pool2Address,
-         token0: intermediateToken,
-         token1: toToken,
-         dex: 'uniswap',
-         version: 'v3',
-         chainId: this.chainId,
-         v3Data: { fee: fee2 },
-         isIntermediate: true,
-      };
-
-      const encodedPath = this.encodePath(
-         [fromToken, intermediateToken, toToken],
-         [fee1, fee2]
-      );
-
-      const path: SwapPath = {
-         pools: [pool1, pool2],
-         tokens: [fromToken, intermediateToken, toToken],
-         encodedPath,
-      };
-
-      return {
-         encodedPath,
-         path,
-         pool: pool1,
-         intermediatePool: pool2,
-      };
-   }
-
-   // -- utilities --
+   // -- path building --
 
    private encodePath(tokens: Address[], fees: number[]): Hex {
       if (tokens.length !== fees.length + 1) {
