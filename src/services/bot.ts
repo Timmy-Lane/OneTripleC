@@ -3,15 +3,16 @@ import { TelegramClient } from '../adapters/telegram/telegram-client.js';
 import type { AuthService } from '../domain/auth/auth-service.js';
 import type { WalletService } from '../domain/wallet/wallet-service.js';
 import { getViemClient } from '../adapters/blockchain/viem-client.js';
-import { formatEther, formatUnits, parseUnits, type Address } from 'viem';
+import { formatEther, parseUnits, type Address } from 'viem';
 import { intentService } from '../domain/intents/intent-service.js';
 import { findQuotesByIntentId } from '../persistence/repositories/quote-repository.js';
 import { findExecutionById } from '../persistence/repositories/execution-repository.js';
 import { getExplorerUrl, getRpcUrlForChain, hasRpcConfigured } from '../shared/utils/chain-rpc.js';
 import { getTokenInfo } from '../adapters/tokens/token-info.js';
-import { getNativePriceUsd } from '../adapters/coingecko/index.js';
+import { formatTokenAmount, formatProviderName, formatFeeDisplay } from '../shared/utils/format.js';
 import { findActiveChains } from '../persistence/repositories/chain-repository.js';
 import { findTokensByChainId } from '../persistence/repositories/token-repository.js';
+import { quoteService } from '../domain/routing/quote-service.js';
 
 // Swap conversation state
 interface SwapState {
@@ -30,10 +31,25 @@ interface SwapState {
    displayAmount?: string; // human-readable amount entered by user
    intentId?: string;
    userId?: string;
+   // auto-refresh state
+   refreshInterval?: ReturnType<typeof setInterval>;
+   refreshStartedAt?: number;
 }
 
 // Store conversation state per user
 const swapStates = new Map<number, SwapState>();
+
+const REFRESH_INTERVAL_MS = 5_000;
+const REFRESH_TIMEOUT_MS = 60_000;
+
+function stopRefresh(telegramId: number): void {
+   const state = swapStates.get(telegramId);
+   if (state?.refreshInterval) {
+      clearInterval(state.refreshInterval);
+      state.refreshInterval = undefined;
+      state.refreshStartedAt = undefined;
+   }
+}
 
 export class BotService {
    private client: TelegramClient;
@@ -97,44 +113,25 @@ export class BotService {
          for (let i = 0; i < quotes.length; i++) {
             const quote = quotes[i];
             const route = quote.route as any;
-            const provider = route?.provider || 'Unknown';
 
-            // convert output from wei to human-readable token amount
-            const outputWei = quote.estimatedOutput || '0';
-            const outputFormatted = formatUnits(BigInt(outputWei), targetDecimals);
-            const outputRounded = Number(outputFormatted).toFixed(1);
+            const providerName = formatProviderName(route);
+            const outputDisplay = formatTokenAmount(
+               quote.estimatedOutput || '0',
+               targetDecimals
+            );
+            const feeDisplay = formatFeeDisplay({
+               totalFeeUsd: route?.totalFeeUsd,
+               totalFeeWei: quote.totalFee || undefined,
+               gasPriceGwei: route?.gasPriceGwei,
+            });
 
-            // convert fee to USD
-            let feeDisplay: string;
-            const feeUsd = route?.totalFeeUsd;
-            if (feeUsd) {
-               feeDisplay = `~$${feeUsd}`;
-            } else {
-               // fallback: convert fee wei to ETH then USD
-               const feeWei = quote.totalFee || '0';
-               try {
-                  const nativePrice = await getNativePriceUsd(chainId);
-                  if (nativePrice) {
-                     const feeEth = Number(formatEther(BigInt(feeWei)));
-                     const feeInUsd = (feeEth * nativePrice).toFixed(2);
-                     feeDisplay = `~$${feeInUsd}`;
-                  } else {
-                     const feeEth = Number(formatEther(BigInt(feeWei))).toFixed(6);
-                     feeDisplay = `${feeEth} ETH`;
-                  }
-               } catch {
-                  const feeEth = Number(formatEther(BigInt(feeWei))).toFixed(6);
-                  feeDisplay = `${feeEth} ETH`;
-               }
-            }
-
-            message += `<b>${i + 1}. ${provider}</b>\n`;
-            message += `💰 Output: ${outputRounded} ${targetSymbol}\n`;
+            message += `<b>${i + 1}. ${providerName}</b>\n`;
+            message += `💰 Output: ${outputDisplay} ${targetSymbol}\n`;
             message += `⛽ Fee: ${feeDisplay}\n\n`;
 
             buttons.push([
                {
-                  text: `✅ Select ${provider}`,
+                  text: `✅ Select ${providerName}`,
                   callback_data: `swap_accept_${quote.id}`,
                },
             ]);
@@ -148,6 +145,81 @@ export class BotService {
                inline_keyboard: buttons,
             },
          });
+
+         // start auto-refresh if we have swap params to re-quote
+         if (state?.chainId && state?.sourceToken && state?.targetToken && state?.amount) {
+            stopRefresh(telegramId);
+            const startedAt = Date.now();
+            state.refreshStartedAt = startedAt;
+
+            // capture DB quote IDs so buttons stay stable during refresh
+            const quoteIds = quotes.map(q => q.id);
+
+            state.refreshInterval = setInterval(async () => {
+               try {
+                  const elapsed = Date.now() - startedAt;
+                  if (elapsed >= REFRESH_TIMEOUT_MS) {
+                     stopRefresh(telegramId);
+                     return;
+                  }
+
+                  const freshQuotes = await quoteService.fetchQuotes({
+                     sourceChainId: state.chainId!,
+                     targetChainId: state.chainId!,
+                     sourceToken: state.sourceToken!,
+                     targetToken: state.targetToken!,
+                     sourceAmount: state.amount!,
+                     slippageBps: 50,
+                  });
+
+                  if (freshQuotes.length === 0) return;
+
+                  const remaining = Math.ceil((REFRESH_TIMEOUT_MS - elapsed) / 1000);
+                  let refreshMsg = `📊 <b>Available Quotes</b> (live - ${remaining}s)\n\n`;
+                  const refreshButtons: { text: string; callback_data: string }[][] = [];
+
+                  for (let i = 0; i < freshQuotes.length; i++) {
+                     const fq = freshQuotes[i];
+                     const provName = formatProviderName(fq.route);
+                     const outDisplay = formatTokenAmount(
+                        fq.estimatedOutput || '0',
+                        targetDecimals
+                     );
+                     const feeDsp = formatFeeDisplay({
+                        totalFeeUsd: fq.route.totalFeeUsd || fq.totalFeeUsd,
+                        totalFeeWei: fq.totalFee || undefined,
+                        gasPriceGwei: fq.route.gasPriceGwei,
+                     });
+
+                     refreshMsg += `<b>${i + 1}. ${provName}</b>\n`;
+                     refreshMsg += `💰 Output: ${outDisplay} ${targetSymbol}\n`;
+                     refreshMsg += `⛽ Fee: ${feeDsp}\n\n`;
+
+                     // use original DB quote ID so acceptance works
+                     const btnQuoteId = quoteIds[i] || quoteIds[0];
+                     refreshButtons.push([
+                        {
+                           text: `✅ Select ${provName}`,
+                           callback_data: `swap_accept_${btnQuoteId}`,
+                        },
+                     ]);
+                  }
+
+                  refreshButtons.push([{ text: '❌ Cancel', callback_data: 'back_to_main' }]);
+
+                  await ctx.editMessageText(refreshMsg, {
+                     parse_mode: 'HTML',
+                     reply_markup: { inline_keyboard: refreshButtons },
+                  });
+               } catch (err: any) {
+                  // silently swallow "message is not modified" errors from Telegram
+                  if (err?.description?.includes('message is not modified')) return;
+                  // skip this tick on transient errors, don't stop interval
+               }
+            }, REFRESH_INTERVAL_MS);
+
+            swapStates.set(telegramId, state);
+         }
       } catch (error) {
          console.error('Error showing quotes:', error);
          await ctx.editMessageText('Error loading quotes. Please try again.');
@@ -467,6 +539,8 @@ I help you swap tokens across chains with ONE confirmation.
                return;
             }
 
+            stopRefresh(telegramId);
+
             // Get user
             const user = await this.authService.getOrCreateUser({
                provider: 'telegram',
@@ -776,6 +850,8 @@ Select the <b>target token</b> (the token you want to buy):
             await ctx.answerCbQuery();
             const telegramId = ctx.from?.id;
             if (!telegramId) return;
+
+            stopRefresh(telegramId);
 
             const quoteId = ctx.match[1];
             const state = swapStates.get(telegramId);
@@ -1362,6 +1438,8 @@ Anyone with this key has full access to your wallet.`,
                await ctx.reply('Error: Could not identify user');
                return;
             }
+
+            stopRefresh(telegramId);
 
             const user = await this.authService.getOrCreateUser({
                provider: 'telegram',
