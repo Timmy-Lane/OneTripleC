@@ -160,6 +160,23 @@ export class BotService {
                   const elapsed = Date.now() - startedAt;
                   if (elapsed >= REFRESH_TIMEOUT_MS) {
                      stopRefresh(telegramId);
+
+                     // show timeout message with retry / cancel
+                     try {
+                        await ctx.editMessageText(
+                           'Quote refresh timed out. Prices may be stale.',
+                           {
+                              reply_markup: {
+                                 inline_keyboard: [
+                                    [{ text: 'Refresh Quotes', callback_data: 'swap_retry_quotes' }],
+                                    [{ text: 'Cancel', callback_data: 'swap' }],
+                                 ],
+                              },
+                           }
+                        );
+                     } catch {
+                        // ignore edit failures
+                     }
                      return;
                   }
 
@@ -329,17 +346,17 @@ export class BotService {
             } else if (attempts >= maxAttempts) {
                clearInterval(pollInterval);
                await useCtx.editMessageText(
-                  '⏱️ Timeout waiting for quotes. Please try again.',
+                  'Quote request timed out.',
                   {
                      reply_markup: {
                         inline_keyboard: [
-                           [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                           [{ text: 'Retry', callback_data: 'swap_retry_quotes' }],
+                           [{ text: 'Main Menu', callback_data: 'back_to_main' }],
                         ],
                      },
                   }
                );
-               swapStates.delete(telegramId);
+               // keep swap state so retry can reuse the same parameters
             }
          } catch (err) {
             console.error('Error polling for quotes:', err);
@@ -819,6 +836,36 @@ Select the <b>target token</b> (the token you want to buy):
             }
          } catch (error) {
             console.error('Error handling text input:', error);
+         }
+      });
+
+      // Handle retry after quote timeout -- reuses existing swap state
+      this.bot.action('swap_retry_quotes', async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const state = swapStates.get(telegramId);
+            if (!state || !state.userId || !state.chainId || !state.sourceToken || !state.targetToken || !state.amount) {
+               await ctx.editMessageText('Session expired. Please start a new swap.', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: 'New Swap', callback_data: 'swap' }],
+                        [{ text: 'Main Menu', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               });
+               swapStates.delete(telegramId);
+               return;
+            }
+
+            state.step = 'pending';
+            swapStates.set(telegramId, state);
+            await this.createIntentAndFetchQuotes(ctx, telegramId, state);
+         } catch (error) {
+            console.error('Error retrying quotes:', error);
+            await ctx.reply('An error occurred. Please try again.');
          }
       });
 
