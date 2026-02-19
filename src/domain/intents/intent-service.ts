@@ -223,12 +223,47 @@ export class IntentService {
     try {
       const data = JSON.parse(rawMessage);
 
-      // Validate required fields
-      if (!data.action || data.action !== 'swap') {
-        logger.error({ data }, 'Invalid action - only "swap" is supported');
+      // Validate action
+      if (!data.action || (data.action !== 'swap' && data.action !== 'bridge')) {
+        logger.error({ data }, 'Invalid action - must be "swap" or "bridge"');
         return null;
       }
 
+      const addressRegex = /^0x[a-fA-F0-9]{40}$/;
+
+      // Bridge action: uses explicit sourceChainId and targetChainId
+      if (data.action === 'bridge') {
+        if (!data.sourceChainId || typeof data.sourceChainId !== 'number') {
+          logger.error({ data }, 'Missing or invalid sourceChainId for bridge');
+          return null;
+        }
+        if (!data.targetChainId || typeof data.targetChainId !== 'number') {
+          logger.error({ data }, 'Missing or invalid targetChainId for bridge');
+          return null;
+        }
+        if (!data.sourceToken || !addressRegex.test(data.sourceToken)) {
+          logger.error({ data }, 'Missing or invalid sourceToken for bridge');
+          return null;
+        }
+        if (!data.targetToken || !addressRegex.test(data.targetToken)) {
+          logger.error({ data }, 'Missing or invalid targetToken for bridge');
+          return null;
+        }
+        if (!data.amount || typeof data.amount !== 'string') {
+          logger.error({ data }, 'Missing or invalid amount for bridge');
+          return null;
+        }
+
+        return {
+          sourceChainId: data.sourceChainId,
+          targetChainId: data.targetChainId,
+          sourceToken: data.sourceToken,
+          targetToken: data.targetToken,
+          sourceAmount: data.amount,
+        };
+      }
+
+      // Swap action: uses chainId for both source and target
       if (!data.chainId || typeof data.chainId !== 'number') {
         logger.error({ data }, 'Missing or invalid chainId');
         return null;
@@ -249,8 +284,6 @@ export class IntentService {
         return null;
       }
 
-      // Validate token addresses (basic checksum format check)
-      const addressRegex = /^0x[a-fA-F0-9]{40}$/;
       if (!addressRegex.test(data.sourceToken)) {
         logger.error({ sourceToken: data.sourceToken }, 'Invalid sourceToken address format');
         return null;
@@ -261,10 +294,9 @@ export class IntentService {
         return null;
       }
 
-      // Same-chain swaps: sourceChainId = targetChainId
       return {
         sourceChainId: data.chainId,
-        targetChainId: data.chainId, // V1: same-chain only
+        targetChainId: data.chainId,
         sourceToken: data.sourceToken,
         targetToken: data.targetToken,
         sourceAmount: data.amount,

@@ -10,9 +10,10 @@ import { findExecutionById } from '../persistence/repositories/execution-reposit
 import { getExplorerUrl, getRpcUrlForChain, hasRpcConfigured } from '../shared/utils/chain-rpc.js';
 import { getTokenInfo } from '../adapters/tokens/token-info.js';
 import { formatTokenAmount, formatProviderName, formatFeeDisplay } from '../shared/utils/format.js';
-import { findActiveChains } from '../persistence/repositories/chain-repository.js';
+import { findActiveChains, findChainById } from '../persistence/repositories/chain-repository.js';
 import { findTokensByChainId } from '../persistence/repositories/token-repository.js';
 import { quoteService } from '../domain/routing/quote-service.js';
+import { getSpokePoolAddress } from '../adapters/bridge/across-adapter.js';
 
 // Swap conversation state
 interface SwapState {
@@ -39,6 +40,25 @@ interface SwapState {
 // Store conversation state per user
 const swapStates = new Map<number, SwapState>();
 
+// Bridge conversation state
+interface BridgeState {
+   step: 'sourceChain' | 'targetChain' | 'token' | 'amount' | 'pending' | 'done';
+   sourceChainId?: number;
+   targetChainId?: number;
+   token?: string;
+   amount?: string;
+   displayAmount?: string;
+   intentId?: string;
+   userId?: string;
+   refreshInterval?: ReturnType<typeof setInterval>;
+   refreshStartedAt?: number;
+}
+
+const bridgeStates = new Map<number, BridgeState>();
+
+// chains with Across spoke pool support
+const ACROSS_CHAIN_IDS = new Set([1, 137, 42161, 10, 8453]);
+
 const REFRESH_INTERVAL_MS = 5_000;
 const REFRESH_TIMEOUT_MS = 60_000;
 
@@ -48,6 +68,12 @@ function stopRefresh(telegramId: number): void {
       clearInterval(state.refreshInterval);
       state.refreshInterval = undefined;
       state.refreshStartedAt = undefined;
+   }
+   const bState = bridgeStates.get(telegramId);
+   if (bState?.refreshInterval) {
+      clearInterval(bState.refreshInterval);
+      bState.refreshInterval = undefined;
+      bState.refreshStartedAt = undefined;
    }
 }
 
@@ -67,6 +93,16 @@ export class BotService {
       this.authService = authService;
       this.walletService = walletService;
       this.setupHandlers();
+
+      // global error handler -- prevents unhandled rejections from crashing the process
+      this.bot.catch((err: any, ctx: any) => {
+         console.error('[Bot] Unhandled error in middleware:', err);
+         try {
+            ctx?.reply?.('An error occurred. Please use /start to continue.');
+         } catch {
+            // ignore reply failures
+         }
+      });
    }
 
    private async showQuotes(
@@ -78,27 +114,33 @@ export class BotService {
          const quotes = await findQuotesByIntentId(intentId);
 
          if (quotes.length === 0) {
-            await ctx.editMessageText('No quotes available for this swap.', {
+            const bState0 = bridgeStates.get(telegramId);
+            const retryAction = bState0 ? 'bridge' : 'swap';
+            const label = bState0 ? 'bridge' : 'swap';
+            await ctx.editMessageText(`No quotes available for this ${label}.`, {
                reply_markup: {
                   inline_keyboard: [
-                     [{ text: '🔄 Try Again', callback_data: 'swap' }],
+                     [{ text: '🔄 Try Again', callback_data: retryAction }],
                      [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
                   ],
                },
             });
             swapStates.delete(telegramId);
+            bridgeStates.delete(telegramId);
             return;
          }
 
          const state = swapStates.get(telegramId);
-         const chainId = state?.chainId || 1;
+         const bState = bridgeStates.get(telegramId);
+         const chainId = state?.chainId || bState?.sourceChainId || 1;
 
          // fetch target token info for human-readable output
          let targetDecimals = 18;
          let targetSymbol = 'tokens';
-         if (state?.targetToken) {
+         const targetTokenAddr = state?.targetToken || bState?.token;
+         if (targetTokenAddr) {
             try {
-               const info = await getTokenInfo(chainId, state.targetToken);
+               const info = await getTokenInfo(chainId, targetTokenAddr);
                targetDecimals = info.decimals;
                targetSymbol = info.symbol;
             } catch {
@@ -146,16 +188,19 @@ export class BotService {
             },
          });
 
-         // start auto-refresh if we have swap params to re-quote
-         if (state?.chainId && state?.sourceToken && state?.targetToken && state?.amount) {
+         // start auto-refresh if we have params to re-quote
+         const hasSwapRefresh = state?.chainId && state?.sourceToken && state?.targetToken && state?.amount;
+         const hasBridgeRefresh = bState?.sourceChainId && bState?.targetChainId && bState?.token && bState?.amount;
+         if (hasSwapRefresh || hasBridgeRefresh) {
             stopRefresh(telegramId);
             const startedAt = Date.now();
-            state.refreshStartedAt = startedAt;
+            const refreshOwner = (state || bState)!;
+            refreshOwner.refreshStartedAt = startedAt;
 
             // capture DB quote IDs so buttons stay stable during refresh
             const quoteIds = quotes.map(q => q.id);
 
-            state.refreshInterval = setInterval(async () => {
+            refreshOwner.refreshInterval = setInterval(async () => {
                try {
                   const elapsed = Date.now() - startedAt;
                   if (elapsed >= REFRESH_TIMEOUT_MS) {
@@ -181,11 +226,11 @@ export class BotService {
                   }
 
                   const freshQuotes = await quoteService.fetchQuotes({
-                     sourceChainId: state.chainId!,
-                     targetChainId: state.chainId!,
-                     sourceToken: state.sourceToken!,
-                     targetToken: state.targetToken!,
-                     sourceAmount: state.amount!,
+                     sourceChainId: state?.chainId || bState!.sourceChainId!,
+                     targetChainId: bState?.targetChainId || state!.chainId!,
+                     sourceToken: state?.sourceToken || bState!.token!,
+                     targetToken: state?.targetToken || bState!.token!,
+                     sourceAmount: state?.amount || bState!.amount!,
                      slippageBps: 50,
                   });
 
@@ -235,11 +280,16 @@ export class BotService {
                }
             }, REFRESH_INTERVAL_MS);
 
-            swapStates.set(telegramId, state);
+            if (state) swapStates.set(telegramId, state);
+            if (bState) bridgeStates.set(telegramId, bState);
          }
       } catch (error) {
          console.error('Error showing quotes:', error);
-         await ctx.editMessageText('Error loading quotes. Please try again.');
+         try {
+            await ctx.editMessageText('Error loading quotes. Please try again.');
+         } catch {
+            // ignore secondary failures
+         }
       }
    }
 
@@ -364,6 +414,116 @@ export class BotService {
       }, 1000);
    }
 
+   // shared logic for creating bridge intent and polling for quotes
+   private async createBridgeIntentAndFetchQuotes(
+      ctx: any,
+      telegramId: number,
+      state: BridgeState,
+      replyMsg?: any
+   ): Promise<void> {
+      if (
+         !state.userId ||
+         !state.sourceChainId ||
+         !state.targetChainId ||
+         !state.token ||
+         !state.amount
+      ) {
+         await ctx.reply('Missing bridge data. Please start again.');
+         return;
+      }
+
+      try {
+         if (replyMsg) {
+            await ctx.telegram.editMessageText(
+               replyMsg.chat.id,
+               replyMsg.message_id,
+               undefined,
+               '⏳ Fetching bridge quotes...'
+            );
+         } else {
+            await ctx.editMessageText('⏳ Fetching bridge quotes...');
+         }
+      } catch {
+         // ignore edit failures
+      }
+
+      const rawMessage = JSON.stringify({
+         action: 'bridge',
+         sourceChainId: state.sourceChainId,
+         targetChainId: state.targetChainId,
+         sourceToken: state.token,
+         targetToken: state.token,
+         amount: state.amount,
+      });
+
+      const intent = await intentService.createIntent({
+         userId: state.userId,
+         rawMessage,
+      });
+
+      state.intentId = intent.id;
+      state.step = 'pending';
+      bridgeStates.set(telegramId, state);
+
+      // poll for quotes
+      let attempts = 0;
+      const maxAttempts = 30;
+      const useCtx = replyMsg
+         ? {
+              editMessageText: (text: string, opts?: any) =>
+                 ctx.telegram.editMessageText(
+                    replyMsg.chat.id,
+                    replyMsg.message_id,
+                    undefined,
+                    text,
+                    opts
+                 ),
+           }
+         : ctx;
+
+      const pollInterval = setInterval(async () => {
+         attempts++;
+         try {
+            const currentIntent = await intentService.getIntentById(intent.id);
+
+            if (currentIntent?.state === 'QUOTED') {
+               clearInterval(pollInterval);
+               await this.showQuotes(useCtx, telegramId, intent.id);
+            } else if (currentIntent?.state === 'FAILED') {
+               clearInterval(pollInterval);
+               await useCtx.editMessageText(
+                  `❌ Failed to get bridge quotes: ${currentIntent.errorMessage || 'Unknown error'}`,
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '🔄 Try Again', callback_data: 'bridge' }],
+                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                        ],
+                     },
+                  }
+               );
+               bridgeStates.delete(telegramId);
+            } else if (attempts >= maxAttempts) {
+               clearInterval(pollInterval);
+               await useCtx.editMessageText(
+                  'Bridge quote request timed out.',
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: 'Retry', callback_data: 'bridge_retry_quotes' }],
+                           [{ text: 'Main Menu', callback_data: 'back_to_main' }],
+                        ],
+                     },
+                  }
+               );
+               // keep bridge state so retry can reuse parameters
+            }
+         } catch (err) {
+            console.error('Error polling for bridge quotes:', err);
+         }
+      }, 1000);
+   }
+
    private async showMainMenu(
       ctx: any,
       userId: string,
@@ -429,7 +589,12 @@ ${balanceLines.trim()}`;
       };
 
       if (editMessage && ctx.callbackQuery?.message) {
-         await ctx.editMessageText(message, keyboard);
+         try {
+            await ctx.editMessageText(message, keyboard);
+         } catch {
+            // fallback to new message if edit fails
+            await ctx.reply(message, keyboard);
+         }
       } else {
          await ctx.reply(message, keyboard);
       }
@@ -496,7 +661,11 @@ I help you swap tokens across chains with ONE confirmation.
             }
          } catch (error) {
             console.error('Error in /start handler:', error);
-            await ctx.reply('An error occurred. Please try again.');
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
          }
       });
 
@@ -527,14 +696,19 @@ I help you swap tokens across chains with ONE confirmation.
 
       // Handle Settings button
       this.bot.action('settings', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('⚙️ Settings functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            await ctx.reply('⚙️ Settings functionality coming soon!');
+         } catch (error) {
+            console.error('Error in settings handler:', error);
+         }
       });
 
       // Handle Help button
       this.bot.action('help', async ctx => {
-         await ctx.answerCbQuery();
-         const helpMessage = `❓ <b>How to use OneTripleC:</b>
+         try {
+            await ctx.answerCbQuery();
+            const helpMessage = `❓ <b>How to use OneTripleC:</b>
 
 1️⃣ Use the menu buttons to initiate swaps, bridges, or cross-chain transactions
 
@@ -543,7 +717,10 @@ I help you swap tokens across chains with ONE confirmation.
 3️⃣ Confirm the transaction
 
 4️⃣ Done! I'll notify you when complete.`;
-         await ctx.reply(helpMessage, { parse_mode: 'HTML' });
+            await ctx.reply(helpMessage, { parse_mode: 'HTML' });
+         } catch (error) {
+            console.error('Error in help handler:', error);
+         }
       });
 
       // Main menu button handlers
@@ -557,6 +734,7 @@ I help you swap tokens across chains with ONE confirmation.
             }
 
             stopRefresh(telegramId);
+            bridgeStates.delete(telegramId);
 
             // Get user
             const user = await this.authService.getOrCreateUser({
@@ -601,7 +779,11 @@ Select the network for your swap:`,
             );
          } catch (error) {
             console.error('Error in swap handler:', error);
-            await ctx.reply('An error occurred. Please try again.');
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
          }
       });
 
@@ -720,16 +902,57 @@ Now enter the <b>amount</b> to swap:
          }
       });
 
-      // Handle text input for swap flow
+      // Handle text input for swap and bridge flows
       this.bot.on('text', async ctx => {
          try {
             const telegramId = ctx.from?.id;
             if (!telegramId) return;
 
             const state = swapStates.get(telegramId);
-            if (!state) return; // no active swap flow
+            const bridgeState = bridgeStates.get(telegramId);
+            if (!state && !bridgeState) return; // no active flow
 
             const text = ctx.message.text.trim();
+
+            // bridge amount handling
+            if (bridgeState && bridgeState.step === 'amount') {
+               const amount = parseFloat(text);
+               if (isNaN(amount) || amount <= 0) {
+                  await ctx.reply(
+                     '⚠️ Invalid amount. Please enter a positive number.'
+                  );
+                  return;
+               }
+
+               // get token decimals for proper conversion
+               let decimals = 18;
+               if (bridgeState.token) {
+                  try {
+                     const info = await getTokenInfo(
+                        bridgeState.sourceChainId || 1,
+                        bridgeState.token
+                     );
+                     decimals = info.decimals;
+                  } catch {
+                     // fallback to 18
+                  }
+               }
+
+               bridgeState.displayAmount = text;
+               bridgeState.amount = parseUnits(text, decimals).toString();
+               bridgeStates.set(telegramId, bridgeState);
+
+               const loadingMsg = await ctx.reply('⏳ Fetching bridge quotes...');
+               await this.createBridgeIntentAndFetchQuotes(
+                  ctx,
+                  telegramId,
+                  bridgeState,
+                  loadingMsg
+               );
+               return;
+            }
+
+            if (!state) return;
 
             if (state.step === 'sourceToken') {
                // Validate token address
@@ -865,7 +1088,11 @@ Select the <b>target token</b> (the token you want to buy):
             await this.createIntentAndFetchQuotes(ctx, telegramId, state);
          } catch (error) {
             console.error('Error retrying quotes:', error);
-            await ctx.reply('An error occurred. Please try again.');
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
          }
       });
 
@@ -887,11 +1114,15 @@ Select the <b>target token</b> (the token you want to buy):
             await this.createIntentAndFetchQuotes(ctx, telegramId, state);
          } catch (error) {
             console.error('Error getting quotes:', error);
-            await ctx.reply('An error occurred. Please try again.');
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
          }
       });
 
-      // Handle quote selection
+      // Handle quote selection (works for both swap and bridge)
       this.bot.action(/^swap_accept_(\S+)$/, async ctx => {
          try {
             await ctx.answerCbQuery();
@@ -901,18 +1132,21 @@ Select the <b>target token</b> (the token you want to buy):
             stopRefresh(telegramId);
 
             const quoteId = ctx.match[1];
-            const state = swapStates.get(telegramId);
+            const swapState = swapStates.get(telegramId);
+            const bridgeState = bridgeStates.get(telegramId);
+            const intentId = swapState?.intentId || bridgeState?.intentId;
+            const isBridge = !!bridgeState?.intentId;
 
-            if (!state || !state.intentId) {
+            if (!intentId) {
                await ctx.reply('Session expired. Please start again.');
                return;
             }
 
-            await ctx.editMessageText('🔄 Executing swap...');
+            await ctx.editMessageText(isBridge ? '🔄 Executing bridge...' : '🔄 Executing swap...');
 
             try {
                const result = await intentService.acceptIntent(
-                  state.intentId,
+                  intentId,
                   quoteId
                );
 
@@ -928,68 +1162,69 @@ Select the <b>target token</b> (the token you want to buy):
 
                      if (execution?.state === 'CONFIRMED') {
                         clearInterval(pollInterval);
-                        const explorerUrl = await getExplorerUrl(
-                           state.chainId!
-                        );
+                        const execChainId = swapState?.chainId || bridgeState?.sourceChainId || 1;
+                        const explorerUrl = await getExplorerUrl(execChainId);
                         const txLink = explorerUrl
                            ? `${explorerUrl}/tx/${execution.txHash}`
                            : '';
 
-                        await ctx.editMessageText(
-                           `✅ <b>Swap Complete!</b>
+                        let completeMsg: string;
+                        let actionButtons: { text: string; callback_data: string }[][];
+
+                        if (isBridge) {
+                           const destChain = await findChainById(bridgeState!.targetChainId!);
+                           const destName = destChain?.name || `Chain ${bridgeState!.targetChainId}`;
+                           completeMsg = `✅ <b>Bridge Initiated!</b>
+
+Funds will arrive on ${destName} in ~2-10 minutes.
 
 Transaction hash:
 <code>${execution.txHash}</code>
 
-${txLink ? `<a href="${txLink}">🔍 View on Explorer</a>` : ''}`,
-                           {
-                              parse_mode: 'HTML',
-                              reply_markup: {
-                                 inline_keyboard: [
-                                    [
-                                       {
-                                          text: '🔄 New Swap',
-                                          callback_data: 'swap',
-                                       },
-                                    ],
-                                    [
-                                       {
-                                          text: '🏠 Main Menu',
-                                          callback_data: 'back_to_main',
-                                       },
-                                    ],
-                                 ],
-                              },
-                           }
-                        );
+${txLink ? `<a href="${txLink}">🔍 View on Explorer</a>` : ''}`;
+                           actionButtons = [
+                              [{ text: '🌉 New Bridge', callback_data: 'bridge' }],
+                              [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                           ];
+                        } else {
+                           completeMsg = `✅ <b>Swap Complete!</b>
+
+Transaction hash:
+<code>${execution.txHash}</code>
+
+${txLink ? `<a href="${txLink}">🔍 View on Explorer</a>` : ''}`;
+                           actionButtons = [
+                              [{ text: '🔄 New Swap', callback_data: 'swap' }],
+                              [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                           ];
+                        }
+
+                        await ctx.editMessageText(completeMsg, {
+                           parse_mode: 'HTML',
+                           reply_markup: { inline_keyboard: actionButtons },
+                        });
                         swapStates.delete(telegramId);
+                        bridgeStates.delete(telegramId);
                      } else if (execution?.state === 'FAILED') {
                         clearInterval(pollInterval);
+                        const retryAction = isBridge ? 'bridge' : 'swap';
+                        const label = isBridge ? 'Bridge' : 'Swap';
                         await ctx.editMessageText(
-                           `❌ <b>Swap Failed</b>
+                           `❌ <b>${label} Failed</b>
 
 Error: ${execution.errorMessage || 'Unknown error'}`,
                            {
                               parse_mode: 'HTML',
                               reply_markup: {
                                  inline_keyboard: [
-                                    [
-                                       {
-                                          text: '🔄 Try Again',
-                                          callback_data: 'swap',
-                                       },
-                                    ],
-                                    [
-                                       {
-                                          text: '🏠 Main Menu',
-                                          callback_data: 'back_to_main',
-                                       },
-                                    ],
+                                    [{ text: '🔄 Try Again', callback_data: retryAction }],
+                                    [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
                                  ],
                               },
                            }
                         );
                         swapStates.delete(telegramId);
+                        bridgeStates.delete(telegramId);
                      } else if (attempts >= maxAttempts) {
                         clearInterval(pollInterval);
                         await ctx.editMessageText(
@@ -1002,54 +1237,290 @@ Check your wallet for status.`,
                               parse_mode: 'HTML',
                               reply_markup: {
                                  inline_keyboard: [
-                                    [
-                                       {
-                                          text: '🏠 Main Menu',
-                                          callback_data: 'back_to_main',
-                                       },
-                                    ],
+                                    [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
                                  ],
                               },
                            }
                         );
                         swapStates.delete(telegramId);
+                        bridgeStates.delete(telegramId);
                      }
                   } catch (err) {
                      console.error('Error polling execution:', err);
                   }
                }, 1000);
             } catch (error: any) {
-               await ctx.editMessageText(
-                  `❌ Failed to execute swap: ${error.message || 'Unknown error'}`,
-                  {
-                     reply_markup: {
-                        inline_keyboard: [
-                           [{ text: '🔄 Try Again', callback_data: 'swap' }],
-                           [
-                              {
-                                 text: '🏠 Main Menu',
-                                 callback_data: 'back_to_main',
-                              },
+               const retryAction = isBridge ? 'bridge' : 'swap';
+               const label = isBridge ? 'bridge' : 'swap';
+               try {
+                  await ctx.editMessageText(
+                     `❌ Failed to execute ${label}: ${error.message || 'Unknown error'}`,
+                     {
+                        reply_markup: {
+                           inline_keyboard: [
+                              [{ text: '🔄 Try Again', callback_data: retryAction }],
+                              [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
                            ],
-                        ],
-                     },
-                  }
-               );
+                        },
+                     }
+                  );
+               } catch {
+                  // ignore secondary failures
+               }
                swapStates.delete(telegramId);
+               bridgeStates.delete(telegramId);
             }
          } catch (error) {
             console.error('Error accepting quote:', error);
          }
       });
 
+      // Bridge flow -- source chain selection
       this.bot.action('bridge', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('🌉 Bridge functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) {
+               await ctx.reply('Error: Could not identify user');
+               return;
+            }
+
+            stopRefresh(telegramId);
+            swapStates.delete(telegramId);
+
+            const user = await this.authService.getOrCreateUser({
+               provider: 'telegram',
+               providerId: telegramId.toString(),
+               metadata: {
+                  username: ctx.from?.username,
+                  first_name: ctx.from?.first_name,
+               },
+            });
+
+            bridgeStates.set(telegramId, {
+               step: 'sourceChain',
+               userId: user.id,
+            });
+
+            // load chains from DB, filtered to those with RPC + Across spoke pool
+            const activeChains = await findActiveChains();
+            const chains = activeChains.filter(
+               c => hasRpcConfigured(c.id) && ACROSS_CHAIN_IDS.has(c.id)
+            );
+
+            if (chains.length === 0) {
+               await ctx.editMessageText(
+                  'No bridge-supported chains available.',
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '🏠 Main Menu', callback_data: 'back_to_main' }],
+                        ],
+                     },
+                  }
+               );
+               bridgeStates.delete(telegramId);
+               return;
+            }
+
+            await ctx.editMessageText(
+               `🌉 <b>Bridge Tokens</b>\n\nSelect the <b>source chain</b> (where your tokens are):`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        ...chains.map(chain => [
+                           {
+                              text: `🔗 ${chain.name}`,
+                              callback_data: `bridge_src_${chain.id}`,
+                           },
+                        ]),
+                        [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in bridge handler:', error);
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
+         }
+      });
+
+      // Bridge -- destination chain selection
+      this.bot.action(/^bridge_src_(\d+)$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const sourceChainId = parseInt(ctx.match[1]);
+            const state = bridgeStates.get(telegramId);
+            if (!state) {
+               await ctx.reply('Session expired. Please start again.');
+               return;
+            }
+
+            state.sourceChainId = sourceChainId;
+            state.step = 'targetChain';
+            bridgeStates.set(telegramId, state);
+
+            // show destination chains (exclude source, filter to Across-supported)
+            const activeChains = await findActiveChains();
+            const destChains = activeChains.filter(
+               c => c.id !== sourceChainId && hasRpcConfigured(c.id) && ACROSS_CHAIN_IDS.has(c.id)
+            );
+
+            const sourceChain = await findChainById(sourceChainId);
+            const sourceName = sourceChain?.name || `Chain ${sourceChainId}`;
+
+            await ctx.editMessageText(
+               `🌉 <b>Bridge from ${sourceName}</b>\n\nSelect the <b>destination chain</b>:`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        ...destChains.map(chain => [
+                           {
+                              text: `🔗 ${chain.name}`,
+                              callback_data: `bridge_dst_${chain.id}`,
+                           },
+                        ]),
+                        [{ text: '⬅️ Back', callback_data: 'bridge' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in bridge source chain handler:', error);
+         }
+      });
+
+      // Bridge -- token selection
+      this.bot.action(/^bridge_dst_(\d+)$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const targetChainId = parseInt(ctx.match[1]);
+            const state = bridgeStates.get(telegramId);
+            if (!state || !state.sourceChainId) {
+               await ctx.reply('Session expired. Please start again.');
+               return;
+            }
+
+            state.targetChainId = targetChainId;
+            state.step = 'token';
+            bridgeStates.set(telegramId, state);
+
+            // load tokens from DB for source chain
+            const dbTokens = await findTokensByChainId(state.sourceChainId);
+            const tokenButtons = dbTokens.map(t => ({
+               text: t.symbol,
+               callback_data: `bridge_token_${t.address}`,
+            }));
+            const tokenRows: { text: string; callback_data: string }[][] = [];
+            for (let i = 0; i < tokenButtons.length; i += 3) {
+               tokenRows.push(tokenButtons.slice(i, i + 3));
+            }
+
+            const sourceChain = await findChainById(state.sourceChainId);
+            const destChain = await findChainById(targetChainId);
+            const sourceName = sourceChain?.name || `Chain ${state.sourceChainId}`;
+            const destName = destChain?.name || `Chain ${targetChainId}`;
+
+            await ctx.editMessageText(
+               `🌉 <b>Bridge: ${sourceName} → ${destName}</b>\n\nSelect the token to bridge:`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        ...tokenRows,
+                        [{ text: '⬅️ Back', callback_data: 'bridge' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in bridge dest chain handler:', error);
+         }
+      });
+
+      // Bridge -- amount prompt
+      this.bot.action(/^bridge_token_(0x[a-fA-F0-9]{40})$/, async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const state = bridgeStates.get(telegramId);
+            if (!state || state.step !== 'token') return;
+
+            state.token = ctx.match[1];
+            state.step = 'amount';
+            bridgeStates.set(telegramId, state);
+
+            await ctx.editMessageText(
+               `✅ Token selected\n\nEnter the <b>amount</b> to bridge:\n\n💡 Example: <code>100</code>`,
+               {
+                  parse_mode: 'HTML',
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: '❌ Cancel', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               }
+            );
+         } catch (error) {
+            console.error('Error in bridge token handler:', error);
+         }
+      });
+
+      // Bridge -- retry after quote timeout
+      this.bot.action('bridge_retry_quotes', async ctx => {
+         try {
+            await ctx.answerCbQuery();
+            const telegramId = ctx.from?.id;
+            if (!telegramId) return;
+
+            const state = bridgeStates.get(telegramId);
+            if (!state || !state.userId || !state.sourceChainId || !state.targetChainId || !state.token || !state.amount) {
+               await ctx.editMessageText('Session expired. Please start a new bridge.', {
+                  reply_markup: {
+                     inline_keyboard: [
+                        [{ text: 'New Bridge', callback_data: 'bridge' }],
+                        [{ text: 'Main Menu', callback_data: 'back_to_main' }],
+                     ],
+                  },
+               });
+               bridgeStates.delete(telegramId);
+               return;
+            }
+
+            state.step = 'pending';
+            bridgeStates.set(telegramId, state);
+            await this.createBridgeIntentAndFetchQuotes(ctx, telegramId, state);
+         } catch (error) {
+            console.error('Error retrying bridge quotes:', error);
+            try {
+               await ctx.reply('An error occurred. Please try again.');
+            } catch {
+               // ignore secondary failures
+            }
+         }
       });
 
       this.bot.action('cross_chain', async ctx => {
-         await ctx.answerCbQuery();
-         await ctx.reply('🌐 Cross-chain functionality coming soon!');
+         try {
+            await ctx.answerCbQuery();
+            await ctx.reply('🌐 Cross-chain functionality coming soon!');
+         } catch (error) {
+            console.error('Error in cross_chain handler:', error);
+         }
       });
 
       this.bot.action('refresh_balance', async ctx => {
@@ -1193,16 +1664,20 @@ Check your wallet for status.`,
             );
          } catch (error: any) {
             console.error('Error adding wallet:', error);
-            await ctx.editMessageText(
-               `❌ Error creating wallet: ${error.message || 'Unknown error'}`,
-               {
-                  reply_markup: {
-                     inline_keyboard: [
-                        [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
-                     ],
-                  },
-               }
-            );
+            try {
+               await ctx.editMessageText(
+                  `❌ Error creating wallet: ${error.message || 'Unknown error'}`,
+                  {
+                     reply_markup: {
+                        inline_keyboard: [
+                           [{ text: '👛 Back to Wallets', callback_data: 'wallet' }],
+                        ],
+                     },
+                  }
+               );
+            } catch {
+               // ignore secondary failures
+            }
          }
       });
 
@@ -1487,6 +1962,8 @@ Anyone with this key has full access to your wallet.`,
             }
 
             stopRefresh(telegramId);
+            swapStates.delete(telegramId);
+            bridgeStates.delete(telegramId);
 
             const user = await this.authService.getOrCreateUser({
                provider: 'telegram',
@@ -1500,6 +1977,11 @@ Anyone with this key has full access to your wallet.`,
             await this.showMainMenu(ctx, user.id, true);
          } catch (error) {
             console.error('Error in back_to_main handler:', error);
+            try {
+               await ctx.reply('An error occurred. Use /start to return to the main menu.');
+            } catch {
+               // ignore
+            }
          }
       });
    }

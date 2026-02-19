@@ -20,6 +20,13 @@ export interface BridgeQuote {
   quoteTimestamp: number;
   spokePoolAddress: Address;
   estimatedGas: bigint;
+  // V3 fields
+  inputToken: Address;
+  outputToken: Address;
+  outputAmount: bigint;
+  fillDeadline: number;
+  exclusiveRelayer: Address;
+  exclusivityDeadline: number;
 }
 
 export interface BridgeAdapter {

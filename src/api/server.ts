@@ -167,8 +167,9 @@ process.on('uncaughtException', err => {
 });
 
 process.on('unhandledRejection', reason => {
-   app.log.fatal({ reason }, 'Unhandled promise rejection');
-   gracefulShutdown('UNHANDLED_REJECTION');
+   // log but do not crash -- transient errors (e.g. Telegram API timeouts)
+   // should not take down the entire server
+   app.log.error({ reason }, 'Unhandled promise rejection');
 });
 
 const start = async () => {

@@ -25,6 +25,7 @@ import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
 import { UniversalRouterAdapter } from '../../adapters/dex/universal-router-adapter.js';
 import { PERMIT2_ADDRESS } from '../../adapters/dex/universal-router/constants.js';
 import { getWethAddress } from '../../adapters/tokens/weth.js';
+import { AcrossAdapter } from '../../adapters/bridge/across-adapter.js';
 
 const VIEM_CHAINS: Record<number, Chain> = {
    1: mainnet,
@@ -429,6 +430,59 @@ export function createExecutionService(
       return txHash;
    }
 
+   async function executeBridgeStep(
+      step: RouteStep,
+      walletId: string,
+      walletAddress: Address,
+      chainId: number
+   ): Promise<string> {
+      const privateKey = await walletService.getPrivateKey(walletId);
+      const account = privateKeyToAccount(privateKey);
+
+      const chain = VIEM_CHAINS[chainId];
+      if (!chain) {
+         throw new Error(`Unsupported chain: ${chainId}`);
+      }
+
+      const rpcUrl = getRpcUrl(chainId);
+      const walletClient = createWalletClient({
+         account,
+         chain,
+         transport: http(rpcUrl),
+      });
+
+      // use the Across adapter to build the bridge transaction
+      const acrossAdapter = new AcrossAdapter();
+      const bridgeQuote = await acrossAdapter.getQuote({
+         sourceChainId: chainId,
+         destinationChainId: step.chainId, // destination from the step
+         token: step.fromToken as Address,
+         amount: BigInt(step.fromAmount),
+         recipient: walletAddress,
+      });
+
+      if (!bridgeQuote) {
+         throw new Error('Failed to get fresh bridge quote for execution');
+      }
+
+      const tx = await acrossAdapter.buildBridgeTransaction(
+         bridgeQuote,
+         walletAddress
+      );
+
+      console.log(
+         `[ExecutionService] Submitting bridge tx to spoke pool ${tx.to}`
+      );
+
+      const txHash = await walletClient.sendTransaction({
+         to: tx.to,
+         data: tx.data,
+         value: tx.value,
+      });
+
+      return txHash;
+   }
+
    async function executeIntent(executionId: string): Promise<{
       txHash: string;
       chainId: number;
@@ -468,30 +522,36 @@ export function createExecutionService(
             throw new Error('Wallet not found for user');
          }
 
-         // Get swap steps
+         // Find executable step (SWAP or BRIDGE)
          const swapSteps = route.steps.filter(
             (step: RouteStep) => step.type === 'SWAP'
          );
+         const bridgeSteps = route.steps.filter(
+            (step: RouteStep) => step.type === 'BRIDGE'
+         );
 
-         if (swapSteps.length === 0) {
-            throw new Error('No swap steps found in route');
+         if (swapSteps.length === 0 && bridgeSteps.length === 0) {
+            throw new Error('No executable steps found in route');
          }
 
          // Get slippage from route or use default
          const slippageBps = route.slippageBps || 50;
 
-         // Execute first swap step only (MVP: single-step swaps)
-         const swapStep = swapSteps[0];
+         // Determine the primary step to execute
+         const isBridge = bridgeSteps.length > 0 && swapSteps.length === 0;
+         const primaryStep = isBridge ? bridgeSteps[0] : swapSteps[0];
 
          // Check if source token needs approval (not native ETH)
-         const sourceToken = swapStep.fromToken as Address;
+         const sourceToken = primaryStep.fromToken as Address;
          const isNativeToken =
             sourceToken === '0x0000000000000000000000000000000000000000';
 
-         if (!isNativeToken && swapStep.contractAddress) {
-            const fromAmount = BigInt(swapStep.fromAmount);
-            // UR swaps approve Permit2, not the router
-            const spender = getApprovalTarget(swapStep);
+         if (!isNativeToken && primaryStep.contractAddress) {
+            const fromAmount = BigInt(primaryStep.fromAmount);
+            // for bridge: approve the spoke pool; for swap: use getApprovalTarget
+            const spender = isBridge
+               ? primaryStep.contractAddress as Address
+               : getApprovalTarget(primaryStep);
 
             console.log(
                `[ExecutionService] Checking allowance for ${sourceToken}`
@@ -531,18 +591,33 @@ export function createExecutionService(
                }
 
                console.log(
-                  `[ExecutionService] Approval confirmed, proceeding with swap`
+                  `[ExecutionService] Approval confirmed, proceeding with ${isBridge ? 'bridge' : 'swap'}`
                );
             }
          }
 
-         const txHash = await executeSwapStep(
-            swapStep,
-            wallet.id,
-            wallet.address as Address,
-            execution.chainId,
-            slippageBps
-         );
+         let txHash: string;
+
+         if (isBridge) {
+            // get destination chain from the intent
+            const destChainId = intent.targetChainId || bridgeSteps[0].chainId;
+            // override the step's chainId with the destination for the bridge adapter
+            const bridgeStep = { ...bridgeSteps[0], chainId: destChainId };
+            txHash = await executeBridgeStep(
+               bridgeStep,
+               wallet.id,
+               wallet.address as Address,
+               execution.chainId
+            );
+         } else {
+            txHash = await executeSwapStep(
+               swapSteps[0],
+               wallet.id,
+               wallet.address as Address,
+               execution.chainId,
+               slippageBps
+            );
+         }
 
          // Update execution state to SUBMITTED
          await updateExecutionState(executionId, ExecutionState.SUBMITTED, {
