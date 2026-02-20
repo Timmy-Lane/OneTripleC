@@ -3,7 +3,8 @@ import type { Address, Hex } from 'viem';
 export interface BridgeQuoteParams {
   sourceChainId: number;
   destinationChainId: number;
-  token: Address;
+  inputToken: Address;
+  outputToken: Address;
   amount: bigint;
   recipient: Address;
 }

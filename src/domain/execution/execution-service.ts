@@ -452,11 +452,27 @@ export function createExecutionService(
       });
 
       // use the Across adapter to build the bridge transaction
+      // resolve native ETH (zero address) to WETH for the Across API
+      const NATIVE_ZERO = '0x0000000000000000000000000000000000000000';
+      let inputToken = step.fromToken as Address;
+      let outputToken = (step.toToken || step.fromToken) as Address;
+      if (inputToken.toLowerCase() === NATIVE_ZERO) {
+         const weth = await getWethAddress(chainId);
+         if (!weth) throw new Error(`WETH not configured for chain ${chainId}`);
+         inputToken = weth;
+      }
+      if (outputToken.toLowerCase() === NATIVE_ZERO) {
+         const weth = await getWethAddress(step.chainId);
+         if (!weth) throw new Error(`WETH not configured for chain ${step.chainId}`);
+         outputToken = weth;
+      }
+
       const acrossAdapter = new AcrossAdapter();
       const bridgeQuote = await acrossAdapter.getQuote({
          sourceChainId: chainId,
          destinationChainId: step.chainId, // destination from the step
-         token: step.fromToken as Address,
+         inputToken,
+         outputToken,
          amount: BigInt(step.fromAmount),
          recipient: walletAddress,
       });

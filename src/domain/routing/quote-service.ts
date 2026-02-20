@@ -18,6 +18,10 @@ import { getNativePriceUsd } from '../../adapters/coingecko/index.js';
 import { AcrossAdapter } from '../../adapters/bridge/across-adapter.js';
 import type { BridgeAdapter } from '../../adapters/bridge/types.js';
 import { getRpcUrlForChain } from '../../shared/utils/chain-rpc.js';
+import {
+   findTokenByChainAndAddress,
+   findTokenByChainAndSymbol,
+} from '../../persistence/repositories/token-repository.js';
 
 interface Logger {
    info(obj: object, msg?: string): void;
@@ -136,10 +140,70 @@ export class QuoteService {
       logger.info({ request }, 'Fetching cross-chain quotes via Across');
 
       try {
+         // resolve the correct inputToken and outputToken addresses for the
+         // Across API, which requires chain-specific WETH addresses (not zero
+         // address) and the actual token address on the destination chain
+         const NATIVE_ZERO = '0x0000000000000000000000000000000000000000';
+         let inputToken = request.sourceToken as Address;
+
+         // resolve native ETH to WETH on source chain
+         if (inputToken.toLowerCase() === NATIVE_ZERO) {
+            const weth = await getWethAddress(request.sourceChainId);
+            if (!weth) {
+               logger.error(
+                  { chainId: request.sourceChainId },
+                  'WETH not configured for source chain -- cannot bridge native ETH'
+               );
+               return [];
+            }
+            inputToken = weth;
+         }
+
+         // resolve the output token on the destination chain -- the bot sends
+         // the source chain address as targetToken, but the Across API needs the
+         // token address on the destination chain. look up by symbol.
+         let outputToken: Address;
+         const sourceTokenRecord = await findTokenByChainAndAddress(
+            request.sourceChainId,
+            request.sourceToken
+         );
+         if (sourceTokenRecord) {
+            const destTokenRecord = await findTokenByChainAndSymbol(
+               request.targetChainId,
+               sourceTokenRecord.symbol
+            );
+            if (destTokenRecord) {
+               outputToken = destTokenRecord.address as Address;
+            } else {
+               logger.error(
+                  { symbol: sourceTokenRecord.symbol, destChain: request.targetChainId },
+                  'Token not found on destination chain'
+               );
+               return [];
+            }
+         } else {
+            // token not in DB -- fall back to using WETH if it's native ETH,
+            // otherwise use the source token address and hope the API handles it
+            if (request.sourceToken.toLowerCase() === NATIVE_ZERO) {
+               const weth = await getWethAddress(request.targetChainId);
+               if (!weth) {
+                  logger.error(
+                     { chainId: request.targetChainId },
+                     'WETH not configured for destination chain'
+                  );
+                  return [];
+               }
+               outputToken = weth;
+            } else {
+               outputToken = request.targetToken as Address;
+            }
+         }
+
          const bridgeQuote = await this.bridgeAdapter.getQuote({
             sourceChainId: request.sourceChainId,
             destinationChainId: request.targetChainId,
-            token: request.sourceToken as Address,
+            inputToken,
+            outputToken,
             amount: BigInt(request.sourceAmount),
             recipient: '0x0000000000000000000000000000000000000000' as Address, // placeholder, set at execution time
          });
@@ -169,7 +233,7 @@ export class QuoteService {
             chainId: request.sourceChainId,
             protocol: 'across',
             fromToken: request.sourceToken,
-            toToken: request.targetToken,
+            toToken: outputToken, // resolved destination chain address
             fromAmount: request.sourceAmount,
             toAmountMin: bridgeQuote.estimatedOutput.toString(),
             contractAddress: bridgeQuote.spokePoolAddress,

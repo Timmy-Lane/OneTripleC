@@ -45,21 +45,25 @@ interface LimitsResponse {
 export class AcrossAdapter implements BridgeAdapter {
   async getQuote(params: BridgeQuoteParams): Promise<BridgeQuote | null> {
     try {
-      // fetch suggested fees
-      const feesUrl = `${ACROSS_API_URL}/suggested-fees?token=${params.token}&originChainId=${params.sourceChainId}&destinationChainId=${params.destinationChainId}&amount=${params.amount.toString()}`;
+      // use inputToken/outputToken -- the Across API requires these exact param names
+      // callers must resolve native ETH (zero address) to WETH before calling
+      const feesUrl = `${ACROSS_API_URL}/suggested-fees?inputToken=${params.inputToken}&outputToken=${params.outputToken}&originChainId=${params.sourceChainId}&destinationChainId=${params.destinationChainId}&amount=${params.amount.toString()}`;
+
+      console.log(`[Across] Fetching fees: inputToken=${params.inputToken} outputToken=${params.outputToken} origin=${params.sourceChainId} dest=${params.destinationChainId} amount=${params.amount}`);
 
       const feesResponse = await fetch(feesUrl, {
         tls: { rejectUnauthorized: false },
       } as any);
       if (!feesResponse.ok) {
-        console.error(`[Across] Fees API error: ${feesResponse.status}`);
+        const body = await feesResponse.text().catch(() => '');
+        console.error(`[Across] Fees API error: ${feesResponse.status} ${body}`);
         return null;
       }
 
       const fees: SuggestedFeesResponse = await feesResponse.json();
 
       if (fees.isAmountTooLow) {
-        console.error('[Across] Amount too low for bridge');
+        console.error(`[Across] Amount too low for bridge: ${params.amount}`);
         return null;
       }
 
@@ -85,7 +89,7 @@ export class AcrossAdapter implements BridgeAdapter {
         provider: 'across',
         sourceChainId: params.sourceChainId,
         destinationChainId: params.destinationChainId,
-        token: params.token,
+        token: params.inputToken,
         amount: params.amount,
         estimatedOutput,
         relayFeePct: fees.relayFeePct,
@@ -148,17 +152,30 @@ export class AcrossAdapter implements BridgeAdapter {
     amount: bigint
   ): Promise<boolean> {
     try {
-      const url = `${ACROSS_API_URL}/limits?token=${params.token}&originChainId=${params.sourceChainId}&destinationChainId=${params.destinationChainId}`;
+      const url = `${ACROSS_API_URL}/limits?inputToken=${params.inputToken}&outputToken=${params.outputToken}&originChainId=${params.sourceChainId}&destinationChainId=${params.destinationChainId}`;
       const response = await fetch(url, {
         tls: { rejectUnauthorized: false },
       } as any);
-      if (!response.ok) return false;
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        console.error(`[Across] Limits API error: ${response.status} ${body}`);
+        return false;
+      }
 
       const limits: LimitsResponse = await response.json();
       const min = BigInt(limits.minDeposit);
       const maxInstant = BigInt(limits.maxDepositInstant);
 
-      return amount >= min && amount <= maxInstant;
+      if (amount < min) {
+        console.error(`[Across] Amount ${amount} below minimum ${min}`);
+        return false;
+      }
+      if (amount > maxInstant) {
+        console.error(`[Across] Amount ${amount} above instant max ${maxInstant}`);
+        return false;
+      }
+
+      return true;
     } catch {
       // if we can't check limits, allow the transaction
       return true;

@@ -76,7 +76,8 @@ describe('AcrossAdapter', () => {
     baseParams = {
       sourceChainId: 1,
       destinationChainId: 137,
-      token: USDC_ADDRESS,
+      inputToken: USDC_ADDRESS,
+      outputToken: USDC_POLYGON,
       amount: 1000000n, // 1 USDC (6 decimals)
       recipient: SENDER_ADDRESS,
     };
